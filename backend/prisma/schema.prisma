@@ -1,0 +1,111 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+model User {
+  id           String       @id @default(uuid())
+  email        String       @unique
+  name         String
+  passwordHash String?
+  role         Role         @default(VIEWER)
+  avatarUrl    String?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  deployments  Deployment[]
+  incidents    Incident[]   @relation("IncidentAssignee")
+  logs         AuditLog[]
+}
+enum Role {
+  ADMIN
+  MEMBER
+  VIEWER
+}
+model Service {
+  id           String       @id @default(uuid())
+  name         String
+  status       ServiceState @default(ONLINE)
+  uptime       Float        @default(100)
+  responseTime Int          @default(0)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  incidents    Incident[]
+}
+enum ServiceState {
+  ONLINE
+  OFFLINE
+  DEGRADED
+  MAINTENANCE
+}
+model Deployment {
+  id        String           @id @default(uuid())
+  repo      String
+  branch    String
+  status    DeploymentStatus @default(PENDING)
+  duration  Int?
+  userId    String
+  user      User             @relation(fields: [userId], references: [id])
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+  stages    Stage[]
+}
+enum DeploymentStatus {
+  PENDING
+  RUNNING
+  SUCCESS
+  FAILED
+  CANCELED
+}
+model Stage {
+  id           String           @id @default(uuid())
+  name         String
+  status       DeploymentStatus @default(PENDING)
+  duration     Int?
+  logs         String?
+  deploymentId String
+  deployment   Deployment       @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+}
+model Incident {
+  id          String         @id @default(uuid())
+  title       String
+  description String?
+  severity    Severity
+  status      IncidentStatus @default(INVESTIGATING)
+  serviceId   String?
+  service     Service?       @relation(fields: [serviceId], references: [id])
+  assigneeId  String?
+  assignee    User?          @relation("IncidentAssignee", fields: [assigneeId], references: [id])
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+}
+enum Severity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+}
+enum IncidentStatus {
+  INVESTIGATING
+  IDENTIFIED
+  MONITORING
+  RESOLVED
+}
+model Metric {
+  id        String   @id @default(uuid())
+  type      String   // cpu, memory, network, disk
+  value     Float
+  timestamp DateTime @default(now())
+  host      String   @default("production-node-1")
+}
+model AuditLog {
+  id        String   @id @default(uuid())
+  action    String
+  resource  String
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  createdAt DateTime @default(now())
+}

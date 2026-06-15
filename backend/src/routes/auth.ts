@@ -1,0 +1,10 @@
+import { Router } from 'express';
+import { login, refresh, logout, getMe, firebaseLogin } from '../controllers/auth';
+import { protect } from '../middleware/auth';
+const router = Router();
+router.post('/login', login);
+router.post('/firebase', firebaseLogin);
+router.post('/refresh', refresh);
+router.post('/logout', logout);
+router.get('/me', protect, getMe);
+export default router;
