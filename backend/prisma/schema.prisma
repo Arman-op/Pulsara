@@ -1,56 +1,129 @@
+// Pulsara data model.
+//
+// The connection string is supplied through the validated environment rather
+// than hard-coded, so the same schema drives a developer's container, CI and
+// production without edits. PostgreSQL is the only supported engine: the
+// telemetry features rely on time-ordered aggregate queries and partial
+// indexes that SQLite cannot express.
+
 generator client {
   provider = "prisma-client-js"
 }
+
 datasource db {
-  provider = "sqlite"
-  url      = "file:./dev.db"
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
-model User {
-  id           String       @id @default(uuid())
-  email        String       @unique
-  name         String
-  passwordHash String?
-  role         Role         @default(VIEWER)
-  avatarUrl    String?
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
-  deployments  Deployment[]
-  incidents    Incident[]   @relation("IncidentAssignee")
-  logs         AuditLog[]
-}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
 enum Role {
   ADMIN
   MEMBER
   VIEWER
 }
-model Service {
-  id           String       @id @default(uuid())
-  name         String
-  status       ServiceState @default(ONLINE)
-  uptime       Float        @default(100)
-  responseTime Int          @default(0)
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
-  incidents    Incident[]
+
+model User {
+  id String @id @default(uuid()) @db.Uuid
+
+  /// Stored lower-cased. Normalising at the single write path keeps the schema
+  /// free of the preview-gated `citext` extension, which managed Postgres
+  /// providers frequently restrict.
+  email String @unique @db.VarChar(320)
+  name  String @db.VarChar(120)
+
+  /// Argon2id digest. Null for accounts that authenticate exclusively through
+  /// a federated identity provider and therefore have no local password.
+  passwordHash String? @db.VarChar(255)
+
+  /// Subject claim from the federated identity provider, when one is linked.
+  firebaseUid String? @unique @db.VarChar(128)
+
+  role      Role    @default(VIEWER)
+  avatarUrl String? @db.VarChar(2048)
+  isActive  Boolean @default(true)
+
+  lastLoginAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  deployments   Deployment[]
+  incidents     Incident[]     @relation("IncidentAssignee")
+  auditLogs     AuditLog[]
+  refreshTokens RefreshToken[]
+
+  @@index([role])
 }
+
+/// A single issued refresh token.
+///
+/// Refresh tokens are persisted so that a session can actually be revoked;
+/// a stateless refresh token is valid until it expires no matter what the
+/// server learns about it in the meantime. Only the SHA-256 digest is stored,
+/// so a database disclosure does not hand an attacker usable sessions.
+model RefreshToken {
+  id String @id @default(uuid()) @db.Uuid
+
+  userId String @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// SHA-256 of the issued token, hex encoded.
+  tokenHash String @unique @db.VarChar(64)
+
+  /// Set when this token is rotated out, forming a chain that makes replay of
+  /// a superseded token detectable.
+  replacedByTokenId String? @db.Uuid
+
+  revokedAt DateTime?
+  expiresAt DateTime
+  createdAt DateTime  @default(now())
+
+  /// Recorded for the session list a user sees, and for incident forensics.
+  userAgent String? @db.VarChar(400)
+  ipAddress String? @db.VarChar(64)
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
+}
+
+// ---------------------------------------------------------------------------
+// Service catalogue
+// ---------------------------------------------------------------------------
+
 enum ServiceState {
   ONLINE
   OFFLINE
   DEGRADED
   MAINTENANCE
 }
-model Deployment {
-  id        String           @id @default(uuid())
-  repo      String
-  branch    String
-  status    DeploymentStatus @default(PENDING)
-  duration  Int?
-  userId    String
-  user      User             @relation(fields: [userId], references: [id])
-  createdAt DateTime         @default(now())
-  updatedAt DateTime         @updatedAt
-  stages    Stage[]
+
+model Service {
+  id String @id @default(uuid()) @db.Uuid
+
+  name        String  @unique @db.VarChar(120)
+  description String? @db.VarChar(500)
+
+  status ServiceState @default(ONLINE)
+
+  /// Percentage of successful checks over the reporting window.
+  uptime Float @default(100)
+  /// Most recent observed response time, in milliseconds.
+  responseTime Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  incidents Incident[]
+
+  @@index([status])
 }
+
+// ---------------------------------------------------------------------------
+// Delivery pipeline
+// ---------------------------------------------------------------------------
+
 enum DeploymentStatus {
   PENDING
   RUNNING
@@ -58,54 +131,119 @@ enum DeploymentStatus {
   FAILED
   CANCELED
 }
+
+model Deployment {
+  id String @id @default(uuid()) @db.Uuid
+
+  repo   String @db.VarChar(200)
+  branch String @db.VarChar(200)
+
+  status DeploymentStatus @default(PENDING)
+  /// Wall-clock duration in seconds; null while the run is still in flight.
+  duration Int?
+
+  userId String @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  stages Stage[]
+
+  @@index([status, createdAt(sort: Desc)])
+  @@index([repo, createdAt(sort: Desc)])
+}
+
 model Stage {
-  id           String           @id @default(uuid())
-  name         String
-  status       DeploymentStatus @default(PENDING)
-  duration     Int?
-  logs         String?
-  deploymentId String
-  deployment   Deployment       @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
-  createdAt    DateTime         @default(now())
-  updatedAt    DateTime         @updatedAt
+  id String @id @default(uuid()) @db.Uuid
+
+  name     String           @db.VarChar(120)
+  status   DeploymentStatus @default(PENDING)
+  duration Int?
+  logs     String?
+
+  deploymentId String     @db.Uuid
+  deployment   Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([deploymentId])
 }
-model Incident {
-  id          String         @id @default(uuid())
-  title       String
-  description String?
-  severity    Severity
-  status      IncidentStatus @default(INVESTIGATING)
-  serviceId   String?
-  service     Service?       @relation(fields: [serviceId], references: [id])
-  assigneeId  String?
-  assignee    User?          @relation("IncidentAssignee", fields: [assigneeId], references: [id])
-  createdAt   DateTime       @default(now())
-  updatedAt   DateTime       @updatedAt
-}
+
+// ---------------------------------------------------------------------------
+// Incident management
+// ---------------------------------------------------------------------------
+
 enum Severity {
   CRITICAL
   HIGH
   MEDIUM
   LOW
 }
+
 enum IncidentStatus {
   INVESTIGATING
   IDENTIFIED
   MONITORING
   RESOLVED
 }
-model Metric {
-  id        String   @id @default(uuid())
-  type      String   // cpu, memory, network, disk
-  value     Float
-  timestamp DateTime @default(now())
-  host      String   @default("production-node-1")
+
+model Incident {
+  id String @id @default(uuid()) @db.Uuid
+
+  title       String  @db.VarChar(200)
+  description String?
+
+  severity Severity
+  status   IncidentStatus @default(INVESTIGATING)
+
+  serviceId String?  @db.Uuid
+  service   Service? @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+
+  assigneeId String? @db.Uuid
+  assignee   User?   @relation("IncidentAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+
+  resolvedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([status, createdAt(sort: Desc)])
+  @@index([serviceId])
 }
+
+// ---------------------------------------------------------------------------
+// Telemetry
+// ---------------------------------------------------------------------------
+
+model Metric {
+  id String @id @default(uuid()) @db.Uuid
+
+  /// Metric family, for example `cpu`, `memory`, `disk`, `network`.
+  type      String   @db.VarChar(60)
+  value     Float
+  host      String   @db.VarChar(200)
+  timestamp DateTime @default(now())
+
+  /// Time-series reads are always "one metric family, newest first, on one
+  /// host", so the composite index matches the access pattern exactly.
+  @@index([host, type, timestamp(sort: Desc)])
+}
+
+// ---------------------------------------------------------------------------
+// Audit
+// ---------------------------------------------------------------------------
+
 model AuditLog {
-  id        String   @id @default(uuid())
-  action    String
-  resource  String
-  userId    String
-  user      User     @relation(fields: [userId], references: [id])
+  id String @id @default(uuid()) @db.Uuid
+
+  action   String @db.VarChar(120)
+  resource String @db.VarChar(200)
+
+  userId String @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   createdAt DateTime @default(now())
+
+  @@index([userId, createdAt(sort: Desc)])
 }

@@ -1,63 +1,42 @@
-version: '3.8'
+# Local development infrastructure.
+#
+# This file provides the backing services the application needs on a developer
+# machine. The application containers themselves are not defined here yet:
+# the previous version declared `frontend` and `backend` services that built
+# from `./frontend/Dockerfile` and `./backend/Dockerfile`, neither of which
+# existed, so `docker compose up` failed on a clean checkout. They return with
+# the real container images.
+#
+# It also hard-coded `JWT_SECRET=production_secret_change_me` in a committed
+# file. Nothing in this file is a credential for anything but a throwaway local
+# database, and the API refuses to start with a placeholder signing key.
+
 services:
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    ports:
-      - "80:80"
-    depends_on:
-      - backend
-    restart: unless-stopped
-    networks:
-      - pulsara-net
-  backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    ports:
-      - "4000:4000"
+  postgres:
+    image: postgres:16-alpine
+    container_name: pulsara-postgres-dev
     environment:
-      - NODE_ENV=production
-      - PORT=4000
-      - DATABASE_URL=postgresql://postgres:postgres@db:5432/pulsara?schema=public
-      - JWT_SECRET=production_secret_change_me
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_started
-    restart: unless-stopped
-    networks:
-      - pulsara-net
-  db:
-    image: postgres:15-alpine
-    environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=pulsara
+      POSTGRES_USER: pulsara
+      POSTGRES_PASSWORD: pulsara_local_dev
+      POSTGRES_DB: pulsara
     ports:
-      - "5433:5432"
+      # Deliberately not 5432: developers commonly have a native PostgreSQL
+      # already bound there, and a silent port clash is a confusing failure.
+      - '5433:5432'
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ['CMD-SHELL', 'pg_isready -U pulsara -d pulsara']
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+    restart: unless-stopped
     networks:
-      - pulsara-net
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    networks:
-      - pulsara-net
+      - pulsara
+
 networks:
-  pulsara-net:
+  pulsara:
     driver: bridge
+
 volumes:
   postgres-data:
-  redis-data:
