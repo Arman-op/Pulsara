@@ -89,7 +89,8 @@ backend/
       notFound.ts        404 in the standard envelope
       requestLogger.ts   Request ids and correlated logging
     modules/             One folder per bounded context
-      auth/                Sessions, passwords, federated sign-in
+      auth/                Sessions, passwords, federated sign-in, account
+      users/               Administration, role grants, audit trail
       health/              Liveness and readiness
       services/            Catalogue and probe configuration
       telemetry/           Host collector, probe scheduler, retention, reads
@@ -201,6 +202,52 @@ digest, so response time does not reveal whether an address is registered.
 *minimum* role it requires. The first account in an empty deployment becomes
 administrator; every account after that starts as `VIEWER` and must be promoted
 deliberately.
+
+### Roles are checked against the database, not the token
+
+`protect` establishes *who* the caller is from the signed token. `requireRole`
+establishes *what they may do*, and it re-reads the role and active flag from
+the database rather than trusting the token's claim.
+
+Without that lookup, an administrator demoted thirty seconds ago keeps full
+administrative power until their token expires — precisely the window during
+which somebody's access is being revoked for a reason. The cost is one indexed
+primary-key lookup, paid only on privileged routes.
+
+The deliberate remaining gap: **read** access is still governed by the token's
+claims, so a deactivated user can continue reading for at most one access-token
+lifetime (15 minutes by default). Closing that would mean a database round trip
+on every request. The trade-off is stated rather than hidden, and the knob to
+turn is `ACCESS_TOKEN_TTL_SECONDS`; anything that mutates state, including every
+`ADMIN` and `MEMBER` action, is already checked live.
+
+### Nobody can lock everyone out
+
+An administrator cannot demote or deactivate themselves, and the last active
+administrator cannot be removed by anyone. Both are ways an environment ends up
+with zero administrators and no path back short of editing the database by hand.
+
+The last-administrator check is a read-then-write on a count, so its transaction
+runs at `SERIALIZABLE`. Under the default `READ COMMITTED`, two administrators
+demoting each other at the same instant would both read a count of two, both
+pass the check, and both commit.
+
+Deactivating an account revokes every one of its sessions immediately. Without
+that, a removed account would keep working until its refresh token expired,
+which is up to a week.
+
+### The audit trail
+
+`AuditLog` existed in the original schema and nothing ever wrote to it. It now
+records the privileged actions that matter after an incident and that somebody
+is most likely to want to deny having taken: role grants, deactivations,
+password changes, and service and repository configuration changes.
+
+Writes are fire-and-forget and failure-tolerant: losing an audit row is bad, but
+refusing a legitimate administrative action because the audit insert hit a
+constraint is worse. In a regulated environment the opposite choice is correct,
+and `lib/audit.ts` documents itself as the one place to change it.
+
 
 ---
 

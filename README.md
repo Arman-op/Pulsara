@@ -128,7 +128,12 @@ VITE_FIREBASE_STORAGE_BUCKET=
 ```
 
 The first account to exist in a deployment becomes `ADMIN`. Everyone after that
-starts as `VIEWER` and must be promoted deliberately.
+starts as `VIEWER` and must be promoted deliberately by an administrator through
+`PATCH /api/users/:id`.
+
+An administrator cannot demote or deactivate themselves, and the last active
+administrator cannot be removed — both are ways to end up locked out of your own
+deployment with no path back.
 
 ---
 
@@ -232,6 +237,13 @@ All routes are under `/api`. Every response uses the same envelope:
 | `POST` | `/auth/refresh` | cookie | Rotate the session |
 | `POST` | `/auth/logout` | cookie | Revoke the session |
 | `GET` | `/auth/me` | Bearer | Current user, read from the database |
+| `PATCH` | `/auth/me` | Bearer | Update own name or avatar |
+| `POST` | `/auth/password` | Bearer | Change own password; revokes every session |
+| `GET` | `/auth/sessions` | Bearer | List own live sessions |
+| `DELETE` | `/auth/sessions` | Bearer | Sign out everywhere |
+| `GET` | `/users` | ADMIN | List users (`role`, `isActive`) |
+| `PATCH` | `/users/:id` | ADMIN | Change a role or deactivate an account |
+| `GET` | `/users/audit/log` | ADMIN | Audit trail of privileged actions |
 | `GET` | `/services` | Bearer | Catalogue, with uptime and latency derived from probes |
 | `GET` | `/services/:id` | Bearer | One service plus its recent raw checks |
 | `POST` | `/services` | ADMIN | Register a service to probe |

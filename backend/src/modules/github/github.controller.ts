@@ -1,10 +1,13 @@
+import { AuditAction } from '@prisma/client';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
 import { isGitHubPollingConfigured, isGitHubWebhookConfigured } from '../../config/env';
 import { prisma } from '../../db/prisma';
+import { recordAudit } from '../../lib/audit';
 import { NotFoundError } from '../../lib/errors';
 import { sendSuccess } from '../../lib/http';
 import { parseBody, parseParams, uuidParamSchema } from '../../lib/validation';
+import { requireUser } from '../../middleware/auth';
 import { createConnection, syncConnection } from './github.service';
 
 /**
@@ -67,6 +70,7 @@ export async function listConnections(_req: Request, res: Response): Promise<voi
  * found" instead of as a connection that silently never syncs.
  */
 export async function addConnection(req: Request, res: Response): Promise<void> {
+  const actor = requireUser(req);
   const { owner, name } = parseBody(req, createConnectionSchema);
   const connection = await createConnection(owner, name);
 
@@ -74,11 +78,19 @@ export async function addConnection(req: Request, res: Response): Promise<void> 
   // next scheduled sweep.
   await syncConnection(connection);
 
+  recordAudit(req, actor.id, {
+    action: AuditAction.REPO_CONNECTED,
+    resource: 'repoConnection',
+    resourceId: connection.id,
+    metadata: { repository: `${owner}/${name}` },
+  });
+
   const refreshed = await prisma.repoConnection.findUnique({ where: { id: connection.id } });
   sendSuccess(res, refreshed, undefined, 201);
 }
 
 export async function removeConnection(req: Request, res: Response): Promise<void> {
+  const actor = requireUser(req);
   const { id } = parseParams(req, uuidParamSchema);
 
   const existing = await prisma.repoConnection.findUnique({ where: { id } });
@@ -90,6 +102,13 @@ export async function removeConnection(req: Request, res: Response): Promise<voi
    * destroy the record of what actually shipped.
    */
   await prisma.repoConnection.delete({ where: { id } });
+
+  recordAudit(req, actor.id, {
+    action: AuditAction.REPO_DISCONNECTED,
+    resource: 'repoConnection',
+    resourceId: id,
+    metadata: { repository: `${existing.owner}/${existing.name}` },
+  });
 
   sendSuccess(res, { id, deleted: true });
 }

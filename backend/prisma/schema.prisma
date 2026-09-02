@@ -458,16 +458,48 @@ model Metric {
 // Audit
 // ---------------------------------------------------------------------------
 
+/// A privileged action, recorded for accountability.
+///
+/// Until now this table existed but nothing ever wrote to it. It is now the
+/// record of who changed what: role grants, deactivations, and password
+/// changes. These are exactly the actions that matter after an incident, and
+/// the ones a person is most likely to want to deny having taken.
 model AuditLog {
   id String @id @default(uuid()) @db.Uuid
 
-  action   String @db.VarChar(120)
-  resource String @db.VarChar(200)
+  action AuditAction
 
+  /// The kind of thing acted on, e.g. `user`.
+  resource   String  @db.VarChar(120)
+  /// Identifier of the specific record acted on.
+  resourceId String? @db.VarChar(120)
+
+  /// Structured before/after detail. Never contains a credential.
+  metadata Json?
+
+  /// Who performed the action.
   userId String @db.Uuid
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  ipAddress String? @db.VarChar(64)
 
   createdAt DateTime @default(now())
 
   @@index([userId, createdAt(sort: Desc)])
+  @@index([resource, resourceId, createdAt(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+}
+
+enum AuditAction {
+  USER_ROLE_CHANGED
+  USER_DEACTIVATED
+  USER_REACTIVATED
+  USER_PROFILE_UPDATED
+  PASSWORD_CHANGED
+  SESSIONS_REVOKED
+  SERVICE_CREATED
+  SERVICE_UPDATED
+  SERVICE_DELETED
+  REPO_CONNECTED
+  REPO_DISCONNECTED
 }

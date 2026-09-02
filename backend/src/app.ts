@@ -17,6 +17,7 @@ import healthRoutes from './modules/health/health.routes';
 import incidentRoutes from './modules/incidents/incidents.routes';
 import serviceRoutes from './modules/services/services.routes';
 import telemetryRoutes from './modules/telemetry/telemetry.routes';
+import userRoutes from './modules/users/users.routes';
 
 export const app = express();
 
@@ -106,6 +107,7 @@ app.use(`${API_PREFIX}/services`, serviceRoutes);
 app.use(`${API_PREFIX}/incidents`, incidentRoutes);
 app.use(`${API_PREFIX}/metrics`, telemetryRoutes);
 app.use(`${API_PREFIX}/integrations/github`, githubRoutes);
+app.use(`${API_PREFIX}/users`, userRoutes);
 
 app.use(notFound);
 app.use(errorHandler);

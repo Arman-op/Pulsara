@@ -1,10 +1,12 @@
-import { ServiceState } from '@prisma/client';
+import { AuditAction, ServiceState } from '@prisma/client';
 import type { Request, Response } from 'express';
 import { env } from '../../config/env';
 import { prisma } from '../../db/prisma';
+import { recordAudit } from '../../lib/audit';
 import { NotFoundError } from '../../lib/errors';
 import { sendSuccess } from '../../lib/http';
 import { parseBody, parseParams, uuidParamSchema } from '../../lib/validation';
+import { requireUser } from '../../middleware/auth';
 import { NO_OBSERVATIONS, getServiceHealth } from '../telemetry/telemetry.service';
 import { createServiceSchema, updateServiceSchema } from './services.schemas';
 
@@ -86,6 +88,7 @@ export async function getService(req: Request, res: Response): Promise<void> {
 }
 
 export async function createService(req: Request, res: Response): Promise<void> {
+  const actor = requireUser(req);
   const input = parseBody(req, createServiceSchema);
 
   const service = await prisma.service.create({
@@ -102,10 +105,22 @@ export async function createService(req: Request, res: Response): Promise<void> 
     },
   });
 
+  recordAudit(req, actor.id, {
+    action: AuditAction.SERVICE_CREATED,
+    resource: 'service',
+    resourceId: service.id,
+    metadata: {
+      name: service.name,
+      probeType: service.probeType,
+      probeTarget: service.probeTarget,
+    },
+  });
+
   sendSuccess(res, service, undefined, 201);
 }
 
 export async function updateService(req: Request, res: Response): Promise<void> {
+  const actor = requireUser(req);
   const { id } = parseParams(req, uuidParamSchema);
   const input = parseBody(req, updateServiceSchema);
 
@@ -127,10 +142,18 @@ export async function updateService(req: Request, res: Response): Promise<void> 
     },
   });
 
+  recordAudit(req, actor.id, {
+    action: AuditAction.SERVICE_UPDATED,
+    resource: 'service',
+    resourceId: id,
+    metadata: { fields: Object.keys(input) },
+  });
+
   sendSuccess(res, service);
 }
 
 export async function deleteService(req: Request, res: Response): Promise<void> {
+  const actor = requireUser(req);
   const { id } = parseParams(req, uuidParamSchema);
 
   const existing = await prisma.service.findUnique({ where: { id } });
@@ -139,6 +162,13 @@ export async function deleteService(req: Request, res: Response): Promise<void> 
   // Probe history cascades with the service; incidents keep their record and
   // have their service reference set to null.
   await prisma.service.delete({ where: { id } });
+
+  recordAudit(req, actor.id, {
+    action: AuditAction.SERVICE_DELETED,
+    resource: 'service',
+    resourceId: id,
+    metadata: { name: existing.name },
+  });
 
   sendSuccess(res, { id, deleted: true });
 }
