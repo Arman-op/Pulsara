@@ -1,4 +1,3 @@
-import * as React from 'react';
 import { BrowserRouter, Routes, Route, Outlet } from 'react-router-dom';
 import { ProtectedRoute } from './shared/components/ProtectedRoute';
 import { Sidebar } from './app/Sidebar';
@@ -30,16 +29,21 @@ function ToastContainer() {
         <div
           key={t.id}
           className={`p-4 rounded-xl border backdrop-blur-xl shadow-xl flex justify-between items-start transition-all duration-300 animate-in slide-in-from-bottom-5 ${
-            t.type === 'success' ? 'bg-success/10 border-success/30 text-success' :
-            t.type === 'error' ? 'bg-danger/10 border-danger/30 text-danger' :
-            'bg-surface/85 border-border text-white'
+            t.type === 'success'
+              ? 'bg-success/10 border-success/30 text-success'
+              : t.type === 'error'
+                ? 'bg-danger/10 border-danger/30 text-danger'
+                : 'bg-surface/85 border-border text-white'
           }`}
         >
           <div>
             <h4 className="font-semibold text-sm">{t.title}</h4>
             {t.message && <p className="text-xs text-muted mt-1">{t.message}</p>}
           </div>
-          <button onClick={() => removeToast(t.id)} className="ml-4 text-muted hover:text-white transition-colors">
+          <button
+            onClick={() => removeToast(t.id)}
+            className="ml-4 text-muted hover:text-white transition-colors"
+          >
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -53,7 +57,7 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<Login />} />
-        
+
         <Route element={<ProtectedRoute />}>
           <Route element={<AppLayout />}>
             <Route path="/" element={<Dashboard />} />

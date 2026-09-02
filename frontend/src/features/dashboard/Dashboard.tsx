@@ -1,4 +1,3 @@
-import * as React from 'react';
 import { InfraChart } from './components/InfraChart';
 import { SystemHealthMap } from './components/SystemHealthMap';
 import Pipelines from '../pipelines/Pipelines';
@@ -14,9 +13,7 @@ export default function Dashboard() {
         <h1 className="text-3xl font-extrabold tracking-tight text-white">
           Welcome back, {user?.name || 'DevOps Operator'}
         </h1>
-        <p className="text-muted text-sm">
-          Here is what's happening on your nodes right now.
-        </p>
+        <p className="text-muted text-sm">Here is what's happening on your nodes right now.</p>
       </div>
 
       <div className="grid gap-6 grid-cols-1 lg:grid-cols-6">

@@ -1,23 +1,32 @@
 import * as React from 'react';
 import { useAuthStore } from '../../shared/store/authStore';
 import { Card, CardContent, CardHeader, CardTitle } from '../../shared/components/Card';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../shared/components/Table';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '../../shared/components/Table';
 import { Badge } from '../../shared/components/Badge';
 import { Loader2 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
+import { env } from '../../config/env';
+import type { ApiResponse, Deployment } from '../../shared/api/types';
 export default function Pipelines() {
-  const [deployments, setDeployments] = React.useState<any[]>([]);
+  const [deployments, setDeployments] = React.useState<Deployment[]>([]);
   const [isLoading, setIsLoading] = React.useState(true);
   const { accessToken } = useAuthStore();
   React.useEffect(() => {
     const fetchDeployments = async () => {
       try {
-        const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:4000'}/api/deployments`, {
+        const res = await fetch(`${env.VITE_API_URL}/api/deployments`, {
           headers: {
             Authorization: `Bearer ${accessToken}`,
           },
         });
-        const data = await res.json();
+        const data = (await res.json()) as ApiResponse<Deployment[]>;
         if (data.success) setDeployments(data.data);
       } catch (err) {
         console.error('Failed to fetch deployments', err);
@@ -57,23 +66,38 @@ export default function Pipelines() {
               </TableHeader>
               <TableBody>
                 {deployments.map((d) => (
-                  <TableRow key={d.id} className="cursor-pointer hover:bg-surface/50 transition-colors">
+                  <TableRow
+                    key={d.id}
+                    className="cursor-pointer hover:bg-surface/50 transition-colors"
+                  >
                     <TableCell className="font-medium text-white">{d.repo}</TableCell>
                     <TableCell className="text-muted">
-                      <code className="px-1.5 py-0.5 rounded-md bg-surface border border-border">{d.branch}</code>
+                      <code className="px-1.5 py-0.5 rounded-md bg-surface border border-border">
+                        {d.branch}
+                      </code>
                     </TableCell>
                     <TableCell className="text-muted text-xs">
                       {formatDistanceToNow(new Date(d.createdAt), { addSuffix: true })}
                     </TableCell>
                     <TableCell>
                       <div className="flex items-center gap-1.5 flex-wrap">
-                        {d.stages.map((stg: any, i: number) => (
-                          <Badge 
-                            key={i} 
-                            variant={stg.status === 'RUNNING' ? 'accent' : stg.status === 'FAILED' ? 'danger' : stg.status === 'SUCCESS' ? 'success' : 'outline'} 
+                        {d.stages.map((stg, i) => (
+                          <Badge
+                            key={i}
+                            variant={
+                              stg.status === 'RUNNING'
+                                ? 'accent'
+                                : stg.status === 'FAILED'
+                                  ? 'danger'
+                                  : stg.status === 'SUCCESS'
+                                    ? 'success'
+                                    : 'outline'
+                            }
                             className="text-[10px] uppercase"
                           >
-                            {stg.status === 'RUNNING' && <Loader2 className="w-2.5 h-2.5 mr-1 animate-spin" />}
+                            {stg.status === 'RUNNING' && (
+                              <Loader2 className="w-2.5 h-2.5 mr-1 animate-spin" />
+                            )}
                             {stg.name}
                           </Badge>
                         ))}
@@ -83,7 +107,15 @@ export default function Pipelines() {
                       {d.duration ? `${Math.floor(d.duration / 60)}m ${d.duration % 60}s` : '--'}
                     </TableCell>
                     <TableCell className="text-right">
-                      <Badge variant={d.status === 'SUCCESS' ? 'success' : d.status === 'FAILED' ? 'danger' : 'accent'}>
+                      <Badge
+                        variant={
+                          d.status === 'SUCCESS'
+                            ? 'success'
+                            : d.status === 'FAILED'
+                              ? 'danger'
+                              : 'accent'
+                        }
+                      >
                         {d.status}
                       </Badge>
                     </TableCell>

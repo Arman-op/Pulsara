@@ -1,8 +1,9 @@
 import { useAuthStore } from '../store/authStore';
+import { env } from '../../config/env';
 
 export const fetchWithAuth = async (url: string, options: RequestInit = {}) => {
   const { accessToken } = useAuthStore.getState();
-  const baseUrl = import.meta.env.VITE_API_URL || 'http://localhost:4000';
+  const baseUrl = env.VITE_API_URL;
   const fullUrl = `${baseUrl}/api${url.startsWith('/') ? url : '/' + url}`;
 
   const headers = new Headers(options.headers);

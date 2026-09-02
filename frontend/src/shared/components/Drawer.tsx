@@ -26,7 +26,7 @@ export function Drawer({ isOpen, onClose, title, children }: DrawerProps) {
       <div
         className={cn(
           'fixed inset-0 bg-black/60 backdrop-blur-sm transition-opacity duration-300 z-40',
-          isOpen ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
+          isOpen ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none',
         )}
         onClick={onClose}
       />
@@ -34,7 +34,7 @@ export function Drawer({ isOpen, onClose, title, children }: DrawerProps) {
       <div
         className={cn(
           'fixed right-0 top-0 bottom-0 w-full sm:w-[400px] border-l border-border/50 bg-surface/90 backdrop-blur-2xl p-6 shadow-2xl transition-transform duration-300 ease-in-out z-50 transform',
-          isOpen ? 'translate-x-0' : 'translate-x-full'
+          isOpen ? 'translate-x-0' : 'translate-x-full',
         )}
       >
         <div className="flex items-center justify-between border-b border-border/50 pb-4 mb-6">

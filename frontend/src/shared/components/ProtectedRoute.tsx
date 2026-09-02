@@ -1,4 +1,3 @@
-import * as React from 'react';
 import { Navigate, Outlet, useLocation } from 'react-router-dom';
 import { useAuthStore } from '../store/authStore';
 export function ProtectedRoute() {

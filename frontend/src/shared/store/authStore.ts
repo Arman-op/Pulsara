@@ -1,10 +1,11 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-interface User {
+export interface User {
   id: string;
   email: string;
   name: string;
   role: 'ADMIN' | 'MEMBER' | 'VIEWER';
+  avatarUrl?: string | null;
 }
 interface AuthState {
   user: User | null;
@@ -23,7 +24,7 @@ export const useAuthStore = create<AuthState>()(
     {
       name: 'auth-storage',
       // Persist both user and accessToken in localStorage
-      partialize: (state) => ({ user: state.user, accessToken: state.accessToken }), 
-    }
-  )
+      partialize: (state) => ({ user: state.user, accessToken: state.accessToken }),
+    },
+  ),
 );

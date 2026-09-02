@@ -18,7 +18,7 @@ export const Badge = ({ className, variant = 'default', ...props }: BadgeProps) 
           'bg-surface border border-border text-white': variant === 'outline',
           'bg-white text-black': variant === 'default',
         },
-        className
+        className,
       )}
       {...props}
     />

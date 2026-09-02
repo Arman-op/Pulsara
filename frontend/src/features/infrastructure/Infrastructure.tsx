@@ -1,4 +1,3 @@
-import * as React from 'react';
 import { SystemHealthMap } from '../dashboard/components/SystemHealthMap';
 import { InfraChart } from '../dashboard/components/InfraChart';
 export default function Infrastructure() {
