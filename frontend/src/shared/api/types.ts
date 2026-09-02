@@ -88,29 +88,76 @@ export type Service = ServiceHealth & {
   updatedAt: string;
 };
 
+export type CiProvider = 'GITHUB';
+
+/** One job within a workflow run. */
 export type Stage = {
   id: string;
+  externalId: string | null;
   name: string;
   status: DeploymentStatus;
-  /** Seconds, or null while the stage is still running. */
+  /** Seconds, or null while the job is still running. */
   duration: number | null;
-  logs: string | null;
+  /** Link to this job on the provider, so a failure is one click from logs. */
+  externalUrl: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
   deploymentId: string;
   createdAt: string;
   updatedAt: string;
 };
 
+/** A workflow run mirrored from the CI provider. */
 export type Deployment = {
   id: string;
+  provider: CiProvider;
+  externalId: string;
+  externalUrl: string | null;
   repo: string;
   branch: string;
+  workflowName: string | null;
+  /** What triggered the run: push, pull_request, schedule, workflow_dispatch. */
+  event: string | null;
   status: DeploymentStatus;
   /** Seconds, or null while the run is still in flight. */
   duration: number | null;
-  userId: string;
+  commitSha: string | null;
+  commitMessage: string | null;
+  actorLogin: string | null;
+  actorAvatarUrl: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  userId: string | null;
   createdAt: string;
   updatedAt: string;
   stages: Stage[];
+};
+
+/**
+ * Accompanies a deployment list.
+ *
+ * `connectedRepositories` is what lets the UI tell "no repository is connected"
+ * apart from "connected, but nothing has run yet". Both are an empty list, and
+ * only one of them is a configuration problem.
+ */
+export type DeploymentListMeta = PageMeta & {
+  connectedRepositories: number;
+  pollingConfigured: boolean;
+  webhookConfigured: boolean;
+};
+
+export type RepoConnection = {
+  id: string;
+  provider: CiProvider;
+  owner: string;
+  name: string;
+  defaultBranch: string | null;
+  isActive: boolean;
+  lastSyncedAt: string | null;
+  /** Surfaced in the UI so a broken token is visible, not silently empty. */
+  lastSyncError: string | null;
+  createdAt: string;
+  _count?: { deployments: number };
 };
 
 /// Whether an incident was raised by the alerting engine or by a person.

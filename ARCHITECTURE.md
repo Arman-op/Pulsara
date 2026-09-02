@@ -93,7 +93,8 @@ backend/
       health/              Liveness and readiness
       services/            Catalogue and probe configuration
       telemetry/           Host collector, probe scheduler, retention, reads
-      deployments/         CI/CD history
+      deployments/         Delivery history reads
+      github/              GitHub client, webhook receiver, sync
       incidents/           Alerting engine, incident CRUD and timeline
     realtime/io.ts       Authenticated WebSocket transport and publisher
     app.ts               Middleware pipeline and route mounting
@@ -403,7 +404,87 @@ is not.
 
 ---
 
-## 9. HTTP contract
+## 9. CI/CD: mirroring GitHub Actions
+
+Deployments were previously five rows written by the seed script, with
+`Math.random()` durations and stages named Build/Test/Deploy that corresponded
+to nothing that had ever executed. Every row is now a real workflow run.
+
+### Webhooks for freshness, polling for correctness
+
+The two mechanisms are not redundant, they cover each other's blind spots:
+
+- **Webhooks** deliver a run within seconds of it changing, but only cover what
+  happens after the hook is installed, and a delivery can be missed while the
+  service is redeploying.
+- **Polling** replays recent history, so anything missed is recovered on the
+  next sweep. It uses GitHub's ETag: a `304 Not Modified` is not charged against
+  the rate limit, which makes a frequent poll nearly free.
+
+Both paths write through the same upsert keyed on `(provider, externalId)`.
+Webhook delivery is at-least-once and overlaps with polling, so the same run
+arrives repeatedly and by more than one route; inserting rather than upserting
+would produce duplicate pipeline rows for a single deployment.
+
+### The webhook signature is the whole security boundary
+
+The webhook endpoint is reachable by anyone on the internet. Without a valid
+signature check, anyone could POST forged deployment records into the dashboard.
+
+Two implementation details are load-bearing, and both are easy to get subtly
+wrong:
+
+1. **The digest is computed over the raw bytes.** The webhook route is mounted
+   *before* `express.json()` with its own `express.raw()` parser. Once the JSON
+   parser has consumed the stream the original bytes are gone, and
+   re-serialising the parsed object does not reproduce them — key order, unicode
+   escaping and whitespace all differ. Verifying a re-serialised body rejects
+   valid deliveries, and the usual "fix" for that is to stop verifying. The
+   handler asserts the body is a `Buffer` so that reordering the middleware
+   cannot silently disable the check.
+2. **The comparison is `timingSafeEqual`.** A `===` on strings returns as soon
+   as it finds a differing byte, leaking how much of a guessed signature was
+   correct and making the digest forgeable one byte at a time. Lengths are
+   compared first, because `timingSafeEqual` throws on a length mismatch and
+   that throw would itself be a side channel.
+
+Unrecognised event types are acknowledged with 200 rather than rejected.
+Replying 4xx to an event we simply do not handle would make GitHub retry it
+forever and eventually disable the hook.
+
+### Mapping two fields onto one
+
+GitHub splits a run's outcome across `status` (queued, in_progress, completed)
+and `conclusion` (null until it finishes). Collapsing them correctly is the
+whole job of the mapper, and getting it wrong is how a dashboard shows a failed
+deployment as green.
+
+`action_required` and `neutral` are treated as failures: a run that finished
+without doing its job is not a green deployment. Duration is null rather than
+negative when timestamps disagree, which happens with clock skew across runners
+and would otherwise render as a build that took minus four seconds.
+
+### Empty is not the same as unconfigured
+
+The deployment list returns `connectedRepositories`, `pollingConfigured` and
+`webhookConfigured` alongside the rows. "No repository connected" and
+"connected but nothing has run" are both an empty list, and only one of them is
+something the user has to fix. A failed sync is stored on the connection as
+`lastSyncError` so a revoked token is visible in the UI rather than presenting
+as a repository that has gone quiet.
+
+### Cost control
+
+Only the first page of runs is fetched per sweep: Pulsara mirrors *recent*
+delivery activity, and walking a repository's whole history on every sync would
+spend the rate limit on data nobody is looking at. Connections are synced
+sequentially, because they share one rate-limit budget and running them in
+parallel only exhausts it faster. Jobs are fetched only for runs that have
+actually started.
+
+---
+
+## 10. HTTP contract
 
 Every endpoint returns the same envelope:
 
@@ -427,7 +508,7 @@ the server log, so a user-reported failure maps to a log entry directly.
 
 ---
 
-## 10. Observability and lifecycle
+## 11. Observability and lifecycle
 
 - **Logging**: pino, newline-delimited JSON, with authorization headers,
   cookies and password fields redacted at the logger rather than at each call
@@ -443,7 +524,7 @@ the server log, so a user-reported failure maps to a log entry directly.
 
 ---
 
-## 11. Implementation status
+## 12. Implementation status
 
 | Area | State |
 | :--- | :--- |
@@ -457,7 +538,7 @@ the server log, so a user-reported failure maps to a log entry directly.
 | Authenticated realtime stream | Implemented |
 | Telemetry retention | Implemented |
 | Incident/alerting engine | Implemented |
-| GitHub Actions integration | **Not yet implemented** |
+| GitHub Actions integration | Implemented |
 | Automated tests | **Not yet implemented** |
 | Container images and CI | **Not yet implemented** |
 

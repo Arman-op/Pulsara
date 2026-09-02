@@ -132,6 +132,46 @@ starts as `VIEWER` and must be promoted deliberately.
 
 ---
 
+## GitHub Actions (optional)
+
+Without this configured, the Pipelines view says so plainly. It never shows
+placeholder pipelines.
+
+**1. Create a token.** A fine-grained personal access token with **Actions:
+Read-only** on the repositories you want to mirror. Put it in `backend/.env`:
+
+```
+GITHUB_TOKEN=github_pat_...
+```
+
+**2. Connect a repository** (as an `ADMIN` user):
+
+```bash
+curl -X POST http://localhost:4000/api/integrations/github/connections \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"owner":"your-org","name":"your-repo"}'
+```
+
+The repository is verified against the API before it is stored, so a typo fails
+immediately instead of becoming a connection that silently never syncs. Recent
+runs are backfilled straight away.
+
+**3. Add a webhook (optional, for live updates).** In the repository's
+*Settings → Webhooks*:
+
+- Payload URL: `https://your-host/api/integrations/github/webhook`
+- Content type: `application/json`
+- Secret: generate with `openssl rand -base64 32` and set the same value as
+  `GITHUB_WEBHOOK_SECRET` in `backend/.env`
+- Events: **Workflow runs** and **Workflow jobs**
+
+Deliveries without a valid HMAC-SHA256 signature are rejected. Polling still
+reconciles anything a missed delivery would have lost, so webhooks are an
+optimisation rather than a requirement.
+
+---
+
 ## Scripts
 
 ### `backend/`
@@ -200,7 +240,15 @@ All routes are under `/api`. Every response uses the same envelope:
 | `GET` | `/metrics/series` | Bearer | Downsampled telemetry (`from`, `to`, `types`, `maxPoints`) |
 | `GET` | `/metrics/latest` | Bearer | Most recent sample of each metric family |
 | `GET` | `/metrics/hosts` | Bearer | Hosts that have reported samples |
-| `GET` | `/deployments` | Bearer | Deployment history (`limit`, `offset`) |
+| `GET` | `/deployments` | Bearer | Workflow runs (`limit`, `offset`, `status`, `repo`, `branch`) |
+| `GET` | `/deployments/stats` | Bearer | Success rate and median duration |
+| `GET` | `/deployments/:id` | Bearer | One run with its jobs |
+| `GET` | `/integrations/github/status` | Bearer | Whether polling and webhooks are configured |
+| `GET` | `/integrations/github/connections` | Bearer | Connected repositories |
+| `POST` | `/integrations/github/connections` | ADMIN | Connect a repository |
+| `DELETE` | `/integrations/github/connections/:id` | ADMIN | Disconnect (history is kept) |
+| `POST` | `/integrations/github/connections/:id/sync` | ADMIN | Force a sync now |
+| `POST` | `/integrations/github/webhook` | signature | GitHub delivery endpoint |
 | `GET` | `/incidents` | Bearer | Feed (`limit`, `offset`, `status`, `severity`, `serviceId`, `isOpen`) |
 | `GET` | `/incidents/summary` | Bearer | Open/resolved counts by severity |
 | `GET` | `/incidents/:id` | Bearer | One incident with its full timeline |
@@ -217,10 +265,10 @@ migrations, authentication with rotation and RBAC, the error contract,
 structured logging, health probes, graceful shutdown, real host telemetry
 collection, service probing with a hysteresis state machine, derived uptime and
 latency percentiles, retention, an authenticated realtime stream, and an
-alerting engine that opens and resolves incidents from observed outages.
+alerting engine that opens and resolves incidents from observed outages, and a
+GitHub Actions integration with signed webhooks and reconciling backfill.
 
-Not yet implemented: the GitHub Actions integration, automated tests, and
-container images with CI.
+Not yet implemented: automated tests, and container images with CI.
 [ARCHITECTURE.md](./ARCHITECTURE.md) tracks the current state precisely.
 
 ---

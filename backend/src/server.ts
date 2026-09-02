@@ -1,9 +1,10 @@
 import { createServer } from 'node:http';
 import { SHUTDOWN_GRACE_PERIOD_MS } from './config/constants';
-import { env } from './config/env';
+import { env, isGitHubPollingConfigured } from './config/env';
 import { app } from './app';
 import { prisma } from './db/prisma';
 import { logger } from './lib/logger';
+import { startGitHubSync } from './modules/github/github.service';
 import { handleServiceStatusChange } from './modules/incidents/incident-engine';
 import { startHostCollector } from './modules/telemetry/host-collector';
 import { startProbeScheduler } from './modules/telemetry/probe-scheduler';
@@ -43,11 +44,22 @@ const probeScheduler = env.PROBES_ENABLED
 
 const retentionJob = startRetentionJob();
 
+/**
+ * Polling is the reconciling half of the CI integration: webhooks make the data
+ * fresh, and this makes it correct by recovering deliveries missed while the
+ * service was restarting. It only runs when a token is configured, because
+ * without one there is nothing it could read.
+ */
+const githubSync = env.GITHUB_SYNC_ENABLED && isGitHubPollingConfigured ? startGitHubSync() : null;
+
 if (!hostCollector) {
   logger.warn('Host metric collection is disabled; the telemetry chart will have no data');
 }
 if (!probeScheduler) {
   logger.warn('Service probing is disabled; service health will not be measured');
+}
+if (!githubSync) {
+  logger.info('GitHub polling is not active; the pipelines view reports it as not connected');
 }
 
 httpServer.listen(env.PORT, () => {
@@ -86,6 +98,7 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
     hostCollector?.stop();
     probeScheduler?.stop();
     retentionJob.stop();
+    githubSync?.stop();
 
     await shutdownRealtimeServer(io);
     await new Promise<void>((resolve, reject) => {

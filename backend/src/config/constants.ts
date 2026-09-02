@@ -27,6 +27,13 @@ export const API_PREFIX = '/api';
 export const MAX_REQUEST_BODY_BYTES = 64 * 1024;
 
 /**
+ * Webhook payloads are much larger than API requests: a GitHub `workflow_run`
+ * event embeds the full repository and commit objects. It gets its own cap so
+ * that raising it does not also raise the limit on every authenticated route.
+ */
+export const MAX_WEBHOOK_BODY_BYTES = 1024 * 1024;
+
+/**
  * The refresh token is delivered as an HttpOnly cookie so that it is not
  * reachable from JavaScript, which is what makes it safe to be long-lived.
  */

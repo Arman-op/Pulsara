@@ -3,13 +3,15 @@ import cors from 'cors';
 import express from 'express';
 import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
-import { API_PREFIX, MAX_REQUEST_BODY_BYTES } from './config/constants';
+import { API_PREFIX, MAX_REQUEST_BODY_BYTES, MAX_WEBHOOK_BODY_BYTES } from './config/constants';
 import { env, isProduction } from './config/env';
 import { ForbiddenError } from './lib/errors';
 import { errorHandler } from './middleware/errorHandler';
 import { notFound } from './middleware/notFound';
 import { requestLogger } from './middleware/requestLogger';
 import authRoutes from './modules/auth/auth.routes';
+import githubRoutes from './modules/github/github.routes';
+import githubWebhookRoutes from './modules/github/github.webhook.routes';
 import deploymentRoutes from './modules/deployments/deployments.routes';
 import healthRoutes from './modules/health/health.routes';
 import incidentRoutes from './modules/incidents/incidents.routes';
@@ -72,6 +74,26 @@ app.use(
   }),
 );
 
+/**
+ * The GitHub webhook is mounted BEFORE the JSON parser, with a raw-body parser
+ * of its own.
+ *
+ * Its signature is an HMAC over the exact bytes GitHub sent. Once
+ * `express.json()` has consumed the stream, those bytes are gone, and
+ * re-serialising the parsed object does not reproduce them: key order, unicode
+ * escaping and whitespace all differ. Verifying against a re-serialised body
+ * would reject valid deliveries, and the usual "fix" for that is to stop
+ * verifying — so the ordering here is a security property, not a preference.
+ *
+ * Webhook payloads are larger than API requests (a workflow_run event carries
+ * the full repository object), hence its own size cap.
+ */
+app.use(
+  `${API_PREFIX}/integrations/github/webhook`,
+  express.raw({ type: '*/*', limit: MAX_WEBHOOK_BODY_BYTES }),
+  githubWebhookRoutes,
+);
+
 app.use(express.json({ limit: MAX_REQUEST_BODY_BYTES }));
 app.use(express.urlencoded({ extended: false, limit: MAX_REQUEST_BODY_BYTES }));
 app.use(cookieParser());
@@ -83,6 +105,7 @@ app.use(`${API_PREFIX}/deployments`, deploymentRoutes);
 app.use(`${API_PREFIX}/services`, serviceRoutes);
 app.use(`${API_PREFIX}/incidents`, incidentRoutes);
 app.use(`${API_PREFIX}/metrics`, telemetryRoutes);
+app.use(`${API_PREFIX}/integrations/github`, githubRoutes);
 
 app.use(notFound);
 app.use(errorHandler);

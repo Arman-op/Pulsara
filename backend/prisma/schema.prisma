@@ -197,35 +197,123 @@ enum DeploymentStatus {
   CANCELED
 }
 
+/// Continuous integration provider a deployment record came from.
+enum CiProvider {
+  GITHUB
+}
+
+/// A repository Pulsara mirrors workflow runs from.
+///
+/// Connections are configuration an operator creates; the runs themselves are
+/// pulled from the provider. Nothing here is invented locally.
+model RepoConnection {
+  id String @id @default(uuid()) @db.Uuid
+
+  provider CiProvider @default(GITHUB)
+  owner    String     @db.VarChar(120)
+  name     String     @db.VarChar(120)
+
+  /// The provider's own numeric repository id.
+  ///
+  /// Recorded because it survives a rename, while owner/name does not. A
+  /// repository renamed upstream would otherwise silently stop matching and
+  /// look like a repository that had gone quiet.
+  externalId String? @db.VarChar(64)
+
+  defaultBranch String? @db.VarChar(200)
+  isActive      Boolean @default(true)
+
+  lastSyncedAt  DateTime?
+  /// Last error from a sync attempt, surfaced in the UI so a broken token is
+  /// visible rather than presenting as an empty pipeline list.
+  lastSyncError String?   @db.VarChar(500)
+
+  /// ETag from the most recent successful list request.
+  ///
+  /// GitHub does not count a 304 response against the rate limit, so replaying
+  /// the ETag makes a frequent poll nearly free.
+  lastEtag String? @db.VarChar(200)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  deployments Deployment[]
+
+  @@unique([provider, owner, name])
+  @@index([isActive])
+}
+
 model Deployment {
   id String @id @default(uuid()) @db.Uuid
+
+  provider CiProvider @default(GITHUB)
+
+  /// The provider's id for this run. Together with `provider` it is the
+  /// idempotency key: webhook delivery is at-least-once and overlaps with
+  /// backfill, so the same run arrives repeatedly and must upsert, not insert.
+  externalId  String  @db.VarChar(64)
+  /// Link back to the run on the provider, so a failure is one click from logs.
+  externalUrl String? @db.VarChar(2048)
 
   repo   String @db.VarChar(200)
   branch String @db.VarChar(200)
 
+  /// Name of the workflow that produced the run.
+  workflowName String? @db.VarChar(200)
+  /// Why the run started: push, pull_request, schedule, workflow_dispatch.
+  event        String? @db.VarChar(60)
+
   status   DeploymentStatus @default(PENDING)
-  /// Wall-clock duration in seconds; null while the run is still in flight.
+  /// Wall-clock seconds, computed from the provider timestamps once finished.
   duration Int?
 
-  userId String @db.Uuid
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  commitSha      String? @db.VarChar(40)
+  commitMessage  String? @db.VarChar(500)
+  /// Provider login of whoever triggered the run.
+  actorLogin     String? @db.VarChar(120)
+  actorAvatarUrl String? @db.VarChar(2048)
+
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  repoConnectionId String?         @db.Uuid
+  repoConnection   RepoConnection? @relation(fields: [repoConnectionId], references: [id], onDelete: SetNull)
+
+  /// The Pulsara user who triggered this, when there is one.
+  ///
+  /// Nullable, unlike before. A run started by a CI bot or by someone with no
+  /// Pulsara account has no local user, and the previous non-null foreign key
+  /// made it impossible to record a real deployment without inventing an owner
+  /// for it.
+  userId String? @db.Uuid
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   stages Stage[]
 
+  @@unique([provider, externalId])
   @@index([status, createdAt(sort: Desc)])
   @@index([repo, createdAt(sort: Desc)])
+  @@index([repoConnectionId, createdAt(sort: Desc)])
 }
 
 model Stage {
   id String @id @default(uuid()) @db.Uuid
 
-  name     String           @db.VarChar(120)
-  status   DeploymentStatus @default(PENDING)
-  duration Int?
-  logs     String?
+  /// Provider id for the job, so repeated webhook deliveries upsert.
+  externalId String? @db.VarChar(64)
+
+  name   String           @db.VarChar(120)
+  status DeploymentStatus @default(PENDING)
+
+  duration    Int?
+  /// Link to this job's logs on the provider.
+  externalUrl String? @db.VarChar(2048)
+
+  startedAt   DateTime?
+  completedAt DateTime?
 
   deploymentId String     @db.Uuid
   deployment   Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
@@ -233,6 +321,7 @@ model Stage {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([deploymentId, externalId])
   @@index([deploymentId])
 }
 

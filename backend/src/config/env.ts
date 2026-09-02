@@ -144,6 +144,34 @@ const envSchema = z.object({
   /** Trailing window over which uptime percentage and latency are computed. */
   UPTIME_WINDOW_HOURS: int(1, 24 * 90).default(24),
 
+  // --- GitHub Actions integration (optional) -------------------------------
+
+  /**
+   * Personal access token or GitHub App installation token with `actions:read`
+   * on the repositories being mirrored. Without it, the pipelines view shows an
+   * honest "not connected" state rather than fabricated rows.
+   */
+  GITHUB_TOKEN: z.string().min(1).optional(),
+
+  /**
+   * Shared secret configured on the webhook. Required to accept deliveries: an
+   * unauthenticated webhook endpoint lets anyone on the internet write
+   * deployment records.
+   */
+  GITHUB_WEBHOOK_SECRET: z.string().min(16).optional(),
+
+  /** Override for GitHub Enterprise Server installations. */
+  GITHUB_API_URL: z.string().url().default('https://api.github.com'),
+
+  /**
+   * Reconciling poll. Webhooks make the data fresh; polling makes it correct,
+   * by recovering deliveries missed while the service was restarting.
+   */
+  GITHUB_SYNC_ENABLED: bool(true),
+  GITHUB_SYNC_INTERVAL_MS: int(30_000, 24 * 60 * 60 * 1000).default(300_000),
+  /** Runs fetched per repository per sync. */
+  GITHUB_BACKFILL_RUNS: int(1, 100).default(30),
+
   /**
    * Federated sign-in via Firebase is optional. The three credential fields
    * are all-or-nothing: a partial configuration is a mistake, and treating it
@@ -220,6 +248,17 @@ export const env = loadEnv();
 
 export const isProduction = env.NODE_ENV === 'production';
 export const isTest = env.NODE_ENV === 'test';
+
+/**
+ * Whether the GitHub integration can do anything.
+ *
+ * The token and the webhook secret are independent capabilities: a deployment
+ * may poll without receiving webhooks (no public URL) or receive webhooks
+ * without polling. Each is reported separately so the UI can say precisely
+ * which half is missing.
+ */
+export const isGitHubPollingConfigured = Boolean(env.GITHUB_TOKEN);
+export const isGitHubWebhookConfigured = Boolean(env.GITHUB_WEBHOOK_SECRET);
 
 /** Whether federated sign-in is configured for this deployment. */
 export const isFirebaseConfigured = Boolean(
