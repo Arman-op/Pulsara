@@ -67,10 +67,16 @@ becomes your first login.
 Then create the schema, bootstrap the database and run:
 
 ```bash
-npm run db:migrate     # apply migrations
-npm run db:seed        # first admin + service catalogue
+npm run db:deploy      # apply migrations
+npm run db:seed        # first admin + service catalogue with live probe targets
 npm run dev            # http://localhost:4000
 ```
+
+The seed registers three services with **real, reachable probe targets**: this
+API, the PostgreSQL instance named by your `DATABASE_URL`, and the web client
+origin. Within a minute the dashboard reports measured uptime and latency for
+each. If the web client is not running yet it will correctly show as offline;
+start it and the probe promotes it back to online on its own.
 
 Check it is alive:
 
@@ -186,7 +192,14 @@ All routes are under `/api`. Every response uses the same envelope:
 | `POST` | `/auth/refresh` | cookie | Rotate the session |
 | `POST` | `/auth/logout` | cookie | Revoke the session |
 | `GET` | `/auth/me` | Bearer | Current user, read from the database |
-| `GET` | `/services` | Bearer | Service catalogue |
+| `GET` | `/services` | Bearer | Catalogue, with uptime and latency derived from probes |
+| `GET` | `/services/:id` | Bearer | One service plus its recent raw checks |
+| `POST` | `/services` | ADMIN | Register a service to probe |
+| `PATCH` | `/services/:id` | ADMIN | Update probe config or declare maintenance |
+| `DELETE` | `/services/:id` | ADMIN | Remove a service and its probe history |
+| `GET` | `/metrics/series` | Bearer | Downsampled telemetry (`from`, `to`, `types`, `maxPoints`) |
+| `GET` | `/metrics/latest` | Bearer | Most recent sample of each metric family |
+| `GET` | `/metrics/hosts` | Bearer | Hosts that have reported samples |
 | `GET` | `/deployments` | Bearer | Deployment history (`limit`, `offset`) |
 | `GET` | `/incidents` | Bearer | Incident feed (`limit`, `offset`) |
 
@@ -196,10 +209,12 @@ All routes are under `/api`. Every response uses the same envelope:
 
 Implemented: configuration and secrets hygiene, PostgreSQL with versioned
 migrations, authentication with rotation and RBAC, the error contract,
-structured logging, health probes and graceful shutdown.
+structured logging, health probes, graceful shutdown, real host telemetry
+collection, service probing with a hysteresis state machine, derived uptime and
+latency percentiles, retention, and an authenticated realtime stream.
 
-Not yet implemented: host telemetry and service probing, the alerting engine,
-the GitHub Actions integration, automated tests, and container images with CI.
+Not yet implemented: the alerting engine, the GitHub Actions integration,
+automated tests, and container images with CI.
 [ARCHITECTURE.md](./ARCHITECTURE.md) tracks the current state precisely.
 
 ---

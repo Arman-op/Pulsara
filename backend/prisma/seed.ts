@@ -1,33 +1,30 @@
 import 'dotenv/config';
-import { PrismaClient, Role } from '@prisma/client';
+import { PrismaClient, ProbeType, Role } from '@prisma/client';
 import { z } from 'zod';
 import { hashPassword } from '../src/modules/auth/password';
 
 /**
  * Local development bootstrap.
  *
- * This script exists to make a freshly created database usable: it creates the
- * first administrator so somebody can sign in, and registers the service
- * catalogue that the probe scheduler will monitor.
+ * Creates the first administrator so somebody can sign in, and registers a
+ * service catalogue with **real, reachable probe targets** derived from this
+ * deployment's own configuration.
  *
- * What it deliberately does NOT do is fabricate observations. The previous seed
- * generated deployments, pipeline stages and incidents with `Math.random()`,
- * and the dashboard rendered them as live production data. Deployments come
- * from the CI provider and incidents are opened by the alerting engine from
- * real probe results; inventing either here would put fiction behind a UI whose
- * entire purpose is to be trusted during an outage.
+ * What it deliberately does not do is fabricate observations. The original seed
+ * invented six services with hard-coded uptime percentages and response times
+ * ("Payment Processor", 99.95%, 150ms), five deployments with `Math.random()`
+ * durations, and two incidents — and the dashboard rendered all of it as live
+ * production data. Those services did not exist, so nothing could ever have
+ * measured them.
  *
- * The catalogue below is configuration, not measurement. Health, uptime and
- * latency for these services are all measured at runtime.
+ * The catalogue below is different in kind: every entry is a real process this
+ * stack actually runs, with an address the probe scheduler will genuinely
+ * connect to. If one of them is down, the dashboard will say so, because it
+ * checked. Operators register their own services through the API.
  */
 
 const prisma = new PrismaClient();
 
-/**
- * Seed credentials are supplied by the environment so that no password is ever
- * committed, and so the same script can bootstrap a shared staging database
- * without that database's admin password living in git history.
- */
 const seedEnvSchema = z.object({
   SEED_ADMIN_EMAIL: z.string().email().toLowerCase(),
   SEED_ADMIN_NAME: z.string().min(1).default('Pulsara Administrator'),
@@ -37,22 +34,66 @@ const seedEnvSchema = z.object({
     .refine((value) => value !== 'password', {
       message: 'SEED_ADMIN_PASSWORD must not be the literal string "password"',
     }),
+
+  /** Used to derive the database probe target, so the two cannot disagree. */
+  DATABASE_URL: z.string().url(),
+
+  PORT: z.coerce.number().int().min(1).max(65535).default(4000),
+  /** Origin the web client is served from, used as its probe target. */
+  SEED_WEB_ORIGIN: z.string().url().default('http://localhost:5174'),
 });
 
-/**
- * The services this deployment is responsible for watching.
- *
- * Names and descriptions only. Every numeric field on `Service` is derived from
- * observations, so seeding one here would be seeding a lie.
- */
-const SERVICE_CATALOGUE = [
-  { name: 'API Gateway', description: 'Public edge that fronts every downstream service.' },
-  { name: 'Auth Service', description: 'Issues and validates sessions for the platform.' },
-  { name: 'Payment Processor', description: 'Handles checkout and settlement.' },
-  { name: 'Background Workers', description: 'Asynchronous job queue consumers.' },
-  { name: 'Primary Database', description: 'Primary PostgreSQL cluster.' },
-  { name: 'Redis Cache', description: 'Shared cache and rate-limit counter store.' },
-] as const;
+type SeedService = {
+  name: string;
+  description: string;
+  probeType: ProbeType;
+  probeTarget: string;
+  probeIntervalSeconds: number;
+  probeTimeoutMs: number;
+  expectedStatusMin?: number;
+  expectedStatusMax?: number;
+};
+
+/** Extracts `host:port` from a PostgreSQL connection string. */
+function databaseAddress(databaseUrl: string): string {
+  const parsed = new URL(databaseUrl);
+  const port = parsed.port || '5432';
+  return `${parsed.hostname}:${port}`;
+}
+
+function buildCatalogue(config: z.infer<typeof seedEnvSchema>): SeedService[] {
+  return [
+    {
+      name: 'Pulsara API',
+      description: 'This API. Probed through its own liveness endpoint.',
+      probeType: ProbeType.HTTP,
+      probeTarget: `http://localhost:${config.PORT}/api/health`,
+      probeIntervalSeconds: 15,
+      probeTimeoutMs: 3_000,
+    },
+    {
+      name: 'Pulsara Database',
+      description: 'PostgreSQL instance backing the API, probed at the TCP layer.',
+      probeType: ProbeType.TCP,
+      // Address comes from DATABASE_URL so the probe can never point somewhere
+      // other than the database the application is actually using.
+      probeTarget: databaseAddress(config.DATABASE_URL),
+      probeIntervalSeconds: 30,
+      probeTimeoutMs: 3_000,
+    },
+    {
+      name: 'Pulsara Web',
+      description: 'Web client origin. Reports OFFLINE when the dev server is not running.',
+      probeType: ProbeType.HTTP,
+      probeTarget: config.SEED_WEB_ORIGIN,
+      probeIntervalSeconds: 30,
+      probeTimeoutMs: 3_000,
+      // A dev server answers 200; a static host may redirect.
+      expectedStatusMin: 200,
+      expectedStatusMax: 399,
+    },
+  ];
+}
 
 async function main(): Promise<void> {
   const parsed = seedEnvSchema.safeParse(process.env);
@@ -64,37 +105,73 @@ async function main(): Promise<void> {
     throw new Error(`Seed configuration is invalid:\n${issues}`);
   }
 
-  const { SEED_ADMIN_EMAIL, SEED_ADMIN_NAME, SEED_ADMIN_PASSWORD } = parsed.data;
+  const config = parsed.data;
 
-  /**
-   * Upserts throughout: the seed is idempotent, so running it against a
-   * database that already has data updates the bootstrap rows rather than
-   * failing on a unique constraint or duplicating the catalogue.
-   */
+  // Every write is an upsert, so the seed is idempotent: rerunning it against a
+  // populated database updates the bootstrap rows rather than failing on a
+  // unique constraint or duplicating the catalogue.
   const admin = await prisma.user.upsert({
-    where: { email: SEED_ADMIN_EMAIL },
-    update: { name: SEED_ADMIN_NAME, role: Role.ADMIN, isActive: true },
+    where: { email: config.SEED_ADMIN_EMAIL },
+    update: { name: config.SEED_ADMIN_NAME, role: Role.ADMIN, isActive: true },
     create: {
-      email: SEED_ADMIN_EMAIL,
-      name: SEED_ADMIN_NAME,
-      passwordHash: await hashPassword(SEED_ADMIN_PASSWORD),
+      email: config.SEED_ADMIN_EMAIL,
+      name: config.SEED_ADMIN_NAME,
+      passwordHash: await hashPassword(config.SEED_ADMIN_PASSWORD),
       role: Role.ADMIN,
     },
   });
 
   console.log(`Administrator ready: ${admin.email}`);
 
-  for (const service of SERVICE_CATALOGUE) {
+  const catalogue = buildCatalogue(config);
+
+  for (const service of catalogue) {
     await prisma.service.upsert({
       where: { name: service.name },
-      update: { description: service.description },
-      create: { name: service.name, description: service.description },
+      // Probe configuration is refreshed, but observed state is never touched:
+      // status and the hysteresis counters belong to the scheduler.
+      update: {
+        description: service.description,
+        probeType: service.probeType,
+        probeTarget: service.probeTarget,
+        probeIntervalSeconds: service.probeIntervalSeconds,
+        probeTimeoutMs: service.probeTimeoutMs,
+        ...(service.expectedStatusMin ? { expectedStatusMin: service.expectedStatusMin } : {}),
+        ...(service.expectedStatusMax ? { expectedStatusMax: service.expectedStatusMax } : {}),
+      },
+      create: service,
     });
+    console.log(`  registered ${service.name} -> ${service.probeType} ${service.probeTarget}`);
   }
 
-  console.log(`Service catalogue ready: ${SERVICE_CATALOGUE.length} services`);
-  console.log('Deployments and incidents are intentionally not seeded; they arrive from');
-  console.log('the CI integration and the alerting engine respectively.');
+  /**
+   * The catalogue seeded before this change is left behind on an existing
+   * database. Those rows describe services that never existed and can never be
+   * probed, so they would sit at "not measured" forever.
+   */
+  const removed = await prisma.service.deleteMany({
+    where: {
+      name: {
+        in: [
+          'API Gateway',
+          'Auth Service',
+          'Payment Processor',
+          'Background Workers',
+          'Primary DB',
+          'Primary Database',
+          'Redis Cache',
+        ],
+      },
+    },
+  });
+
+  if (removed.count > 0) {
+    console.log(`Removed ${removed.count} fictional service(s) from the previous seed.`);
+  }
+
+  console.log(`Service catalogue ready: ${catalogue.length} services with live probe targets.`);
+  console.log('Deployments and incidents are not seeded; they come from the CI integration');
+  console.log('and the alerting engine respectively.');
 }
 
 main()

@@ -1,3 +1,4 @@
+import { hostname } from 'node:os';
 import 'dotenv/config';
 import { z } from 'zod';
 
@@ -59,6 +60,17 @@ const csv = z.string().transform((value, ctx) => {
 /** Coerces a numeric string, rejecting NaN rather than silently defaulting. */
 const int = (min: number, max: number) => z.coerce.number().int().min(min).max(max);
 
+/**
+ * Parses a boolean flag. `z.coerce.boolean()` is unusable here: it follows
+ * JavaScript truthiness, so the string "false" would coerce to `true` and
+ * silently enable whatever it was meant to disable.
+ */
+const bool = (defaultValue: boolean) =>
+  z
+    .enum(['true', 'false', '1', '0'])
+    .default(defaultValue ? 'true' : 'false')
+    .transform((value) => value === 'true' || value === '1');
+
 const envSchema = z.object({
   NODE_ENV: z.enum(NODE_ENV_VALUES).default('development'),
   PORT: int(1, 65535).default(4000),
@@ -84,6 +96,53 @@ const envSchema = z.object({
    */
   AUTH_RATE_LIMIT_WINDOW_MS: int(1_000, 60 * 60 * 1000).default(900_000),
   AUTH_RATE_LIMIT_MAX_ATTEMPTS: int(1, 1_000).default(10),
+
+  // --- Telemetry -----------------------------------------------------------
+
+  /**
+   * Label applied to every host metric this process records. Defaults to the
+   * machine's hostname, which is what makes samples from several replicas
+   * distinguishable once the service is scaled out.
+   */
+  TELEMETRY_HOST_ID: z.string().min(1).default(hostname()),
+
+  /** Enables the host metric collector. Off in tests, which have no host to watch. */
+  METRICS_COLLECTION_ENABLED: bool(true),
+  /**
+   * Sampling period. Each tick writes one row per metric family and broadcasts
+   * to connected clients, so this is a direct trade between chart resolution
+   * and write volume.
+   */
+  METRICS_COLLECTION_INTERVAL_MS: int(1_000, 300_000).default(5_000),
+
+  /** Samples older than this are deleted by the retention sweep. */
+  METRICS_RETENTION_DAYS: int(1, 365).default(7),
+  PROBE_RESULT_RETENTION_DAYS: int(1, 365).default(30),
+  RETENTION_SWEEP_INTERVAL_MS: int(60_000, 24 * 60 * 60 * 1000).default(3_600_000),
+
+  /** Enables the service reachability scheduler. */
+  PROBES_ENABLED: bool(true),
+  /**
+   * How often the scheduler wakes to look for services that are due. Each
+   * service carries its own interval; this is only the granularity at which
+   * "due" is evaluated.
+   */
+  PROBE_SCHEDULER_TICK_MS: int(1_000, 60_000).default(5_000),
+  /** Ceiling on probes executed concurrently, to bound sockets and event-loop time. */
+  PROBE_MAX_CONCURRENCY: int(1, 100).default(10),
+
+  /**
+   * Hysteresis. A service is only marked unhealthy after this many consecutive
+   * failures, and only recovers after this many consecutive successes. Acting
+   * on a single result would turn every transient blip into an incident.
+   */
+  SERVICE_FAILURE_THRESHOLD: int(1, 100).default(3),
+  SERVICE_RECOVERY_THRESHOLD: int(1, 100).default(2),
+  /** A reachable service slower than this is reported DEGRADED rather than ONLINE. */
+  SERVICE_DEGRADED_LATENCY_MS: int(1, 600_000).default(1_000),
+
+  /** Trailing window over which uptime percentage and latency are computed. */
+  UPTIME_WINDOW_HOURS: int(1, 24 * 90).default(24),
 
   /**
    * Federated sign-in via Firebase is optional. The three credential fields

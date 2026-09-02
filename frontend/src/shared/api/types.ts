@@ -57,15 +57,34 @@ export type AuthUser = {
   lastLoginAt?: string | null;
 };
 
-export type Service = {
+export type ProbeType = 'HTTP' | 'TCP';
+
+/**
+ * Health derived from stored probe results.
+ *
+ * Every field is nullable, and that is the point: null means "not measured",
+ * which is a different and more honest answer than zero. A service that has
+ * never been checked must not render as 0% uptime, and one that has never
+ * responded must not render as 0ms latency.
+ */
+export type ServiceHealth = {
+  uptimePercent: number | null;
+  latencyP50Ms: number | null;
+  latencyP95Ms: number | null;
+  lastLatencyMs: number | null;
+  sampleCount: number;
+  lastCheckedAt: string | null;
+};
+
+export type Service = ServiceHealth & {
   id: string;
   name: string;
   description: string | null;
   status: ServiceState;
-  /** Percentage of successful checks over the reporting window. */
-  uptime: number;
-  /** Most recent observed response time, in milliseconds. */
-  responseTime: number;
+  probeType: ProbeType | null;
+  probeTarget: string | null;
+  probeIntervalSeconds: number;
+  isMonitored: boolean;
   updatedAt: string;
 };
 
@@ -107,11 +126,49 @@ export type Incident = {
   updatedAt: string;
 };
 
-/** A single point on the live telemetry stream. */
-export type MetricSample = {
-  cpu: number;
-  memory: number;
-  disk: number;
-  network: number;
+/**
+ * A single host telemetry snapshot from the live stream.
+ *
+ * Fields are nullable because not every counter exists on every platform, and
+ * a family that could not be read is omitted rather than reported as zero.
+ * Load average, for instance, does not exist on Windows.
+ */
+export type HostSnapshot = {
+  host: string;
+  /** Percentage. */
+  cpu: number | null;
+  memory: number | null;
+  disk: number | null;
+  /** Bytes per second. */
+  networkRx: number | null;
+  networkTx: number | null;
+  /** 1-minute load average normalised by core count; 1.0 is fully committed. */
+  load1m: number | null;
   timestamp: string;
+};
+
+/** One bucketed point from the metric series endpoint. */
+export type MetricSeriesPoint = {
+  timestamp: string;
+} & Partial<Record<'cpu' | 'memory' | 'disk' | 'network_rx' | 'network_tx' | 'load_1m', number>>;
+
+export type MetricSeriesMeta = {
+  host: string;
+  from: string;
+  to: string;
+  /** Width of each bucket, so the axis can be labelled honestly. */
+  bucketSeconds: number;
+  types: string[];
+  collectorEnabled: boolean;
+};
+
+/** Emitted when the probe scheduler moves a service between states. */
+export type ServiceStatusChange = {
+  serviceId: string;
+  name: string;
+  previous: ServiceState;
+  current: ServiceState;
+  latencyMs: number | null;
+  error: string | null;
+  changedAt: string;
 };

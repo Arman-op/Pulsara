@@ -89,8 +89,13 @@ backend/
       notFound.ts        404 in the standard envelope
       requestLogger.ts   Request ids and correlated logging
     modules/             One folder per bounded context
-      auth/  health/  services/  deployments/  incidents/
-    realtime/io.ts       WebSocket transport
+      auth/                Sessions, passwords, federated sign-in
+      health/              Liveness and readiness
+      services/            Catalogue and probe configuration
+      telemetry/           Host collector, probe scheduler, retention, reads
+      deployments/         CI/CD history
+      incidents/           Incident feed
+    realtime/io.ts       Authenticated WebSocket transport and publisher
     app.ts               Middleware pipeline and route mounting
     server.ts            Listener, graceful shutdown, crash handling
 
@@ -198,7 +203,129 @@ deliberately.
 
 ---
 
-## 7. HTTP contract
+## 7. Telemetry: how a number gets onto the screen
+
+This is the part the product exists for, so it is worth tracing end to end.
+
+### Host metrics
+
+A collector samples real operating-system counters through `systeminformation`
+on a fixed interval, writes one `Metric` row per family, and publishes a
+snapshot to connected clients.
+
+Details that matter:
+
+- **Priming.** `currentLoad` reports load *since boot* on its first call, and
+  `networkStats` returns null rates until it has two observations to
+  difference. One reading is taken and discarded at startup, so the first
+  sample a user sees is a real interval measurement rather than a lifetime
+  average.
+- **Memory uses `active`, not `used`.** On Linux, `used` counts the page cache,
+  which the kernel hands back on demand, so it sits near 100% on any healthy
+  machine and would make the series meaningless.
+- **Disk is the fullest mount, not an average.** One full volume is an outage
+  even when the others are empty.
+- **Load average is omitted on Windows.** Node returns a constant 0 there. A
+  flat line at zero would read as "idle" rather than "not measured", so the
+  family is simply absent.
+- **Overrun protection.** A tick is skipped if the previous one is still
+  running, so a slow disk enumeration cannot make ticks pile up.
+- **Failures are contained.** A failed read is logged and the next tick tries
+  again. Clients see a gap in the series, which is the truthful representation
+  of a period nobody measured.
+
+### Service probing
+
+A scheduler wakes on a tick, selects the services whose own interval has
+elapsed, and probes them with bounded concurrency. HTTP probes issue a real
+`GET` and assert the status falls in the configured range; TCP probes complete
+a real handshake.
+
+- **`GET`, not `HEAD`.** Many services answer `HEAD` with 405 while being
+  perfectly healthy.
+- **The response body is drained.** Otherwise the socket is never released back
+  to the agent, and a long-running scheduler slowly exhausts the pool.
+- **Timeouts record `null` latency.** A timeout measures our patience, not the
+  service's speed; recording it would drag the latency average toward the
+  timeout value.
+- **Bounded concurrency.** Opening every socket at once would inflate the very
+  latencies the probes are trying to measure.
+- **Targets are validated.** An operator-supplied address this server will
+  connect to on a timer is a server-side request forgery primitive if accepted
+  carelessly, so HTTP targets are restricted to `http`/`https` without embedded
+  credentials, and TCP targets to `host:port`.
+
+### Status is a state machine with hysteresis
+
+A service is only declared `OFFLINE` after `SERVICE_FAILURE_THRESHOLD`
+consecutive failures, and only recovers after `SERVICE_RECOVERY_THRESHOLD`
+consecutive successes. Acting on a single result would make a one-off network
+hiccup indistinguishable from a real outage, and would page somebody for both.
+
+`MAINTENANCE` is never entered or left automatically. It is an operator's
+declaration that alerts are expected, and the scheduler must not override it.
+
+A newly registered service starts `DEGRADED`, not `ONLINE`: it has not been
+checked yet, and claiming health that has not been observed is exactly the
+failure this system exists to prevent.
+
+The observation and the derived status are written in one transaction.
+Separate statements would let a crash between them leave a status that no
+stored result supports.
+
+### Health figures are derived, never stored
+
+`uptime` and `responseTime` used to be columns on `Service` whose only writer
+was the seed script, so every service reported the number a literal in
+`seed.ts` had assigned it.
+
+They are now computed from `ProbeResult` at read time, in a single query
+covering every service — the per-service version is invisible with six services
+and pathological with six hundred. Uptime is successes over total in the
+window; latency is reported as p50 *and* p95, because an average hides exactly
+the tail that users feel.
+
+**A service with no observations returns `null`, not `0`.** The client renders
+that as an em dash. "0% uptime" and "never checked" mean very different things
+at three in the morning.
+
+If observation volume outgrows the aggregate, the scaling path is a rollup
+table maintained by the scheduler, not a denormalised column updated in two
+places that can drift from its source.
+
+### Series are downsampled server-side
+
+A 24-hour range at a 5-second interval is roughly 17,000 points per family:
+more than a chart can draw and more than a browser should parse. `date_bin`
+groups the range into at most `maxPoints` even buckets and averages within
+each, so response size is bounded by the request rather than by the range. The
+bucket width is returned in the response so the client can label its axis
+honestly.
+
+The chart does not bridge gaps (`connectNulls={false}`): a gap means a period
+that was not measured, and drawing a line through it would invent data.
+
+### Retention
+
+Telemetry is append-only and grows without bound — roughly a million indexed
+rows per host per month at the default interval. A sweep deletes past the
+retention horizon in bounded batches, so each transaction stays short and never
+blocks the collector writing to the same table. Probe results are kept longer
+than host metrics because they are the evidence behind uptime figures and
+incident timelines, which someone may need to audit after the fact.
+
+### The WebSocket is authenticated
+
+The socket server previously accepted every connection with no credential at
+all, so anyone who could reach the port received a live feed of what was
+presented as production infrastructure telemetry. The handshake now requires
+the same access token as the REST API, supplied through the Socket.IO `auth`
+payload rather than a query parameter, so it does not land in proxy logs or
+browser history.
+
+---
+
+## 8. HTTP contract
 
 Every endpoint returns the same envelope:
 
@@ -222,7 +349,7 @@ the server log, so a user-reported failure maps to a log entry directly.
 
 ---
 
-## 8. Observability and lifecycle
+## 9. Observability and lifecycle
 
 - **Logging**: pino, newline-delimited JSON, with authorization headers,
   cookies and password fields redacted at the logger rather than at each call
@@ -238,7 +365,7 @@ the server log, so a user-reported failure maps to a log entry directly.
 
 ---
 
-## 9. Implementation status
+## 10. Implementation status
 
 | Area | State |
 | :--- | :--- |
@@ -246,12 +373,16 @@ the server log, so a user-reported failure maps to a log entry directly.
 | PostgreSQL + versioned migrations | Implemented |
 | Authentication, rotation, RBAC | Implemented |
 | Error contract, logging, health, shutdown | Implemented |
-| Host telemetry + service probing | **Not yet implemented** |
+| Host telemetry collection | Implemented |
+| Service probing and status state machine | Implemented |
+| Derived uptime and latency percentiles | Implemented |
+| Authenticated realtime stream | Implemented |
+| Telemetry retention | Implemented |
 | Incident/alerting engine | **Not yet implemented** |
 | GitHub Actions integration | **Not yet implemented** |
 | Automated tests | **Not yet implemented** |
 | Container images and CI | **Not yet implemented** |
 
-Until the telemetry engine lands, `Service.uptime` and `Service.responseTime`
-sit at their defaults and the dashboard shows them as such. That is deliberate:
-a service with no measurements reports no measurements.
+Deployments and incidents stay empty until their sources exist. Those views show
+empty states rather than placeholder rows, because an empty list is the truth
+about a system with no CI integration configured.

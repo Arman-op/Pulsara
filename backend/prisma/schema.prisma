@@ -99,25 +99,90 @@ enum ServiceState {
   MAINTENANCE
 }
 
+/// How a service is checked for reachability.
+enum ProbeType {
+  /// Issue a request and assert the response status falls in the expected range.
+  HTTP
+  /// Open a TCP connection and assert the handshake completes.
+  TCP
+}
+
 model Service {
   id String @id @default(uuid()) @db.Uuid
 
   name        String  @unique @db.VarChar(120)
   description String? @db.VarChar(500)
 
+  /// Current health.
+  ///
+  /// Persisted rather than derived because it is a state machine with
+  /// hysteresis: a service only changes state after a threshold number of
+  /// consecutive results agree, which needs memory of what came before.
+  ///
+  /// `uptime` and `responseTime` used to be stored alongside it. They are gone:
+  /// a denormalised column can drift from the observations it claims to
+  /// summarise, and this dashboard's entire value rests on not showing a number
+  /// nobody measured. Both are now computed from ProbeResult on read.
   status ServiceState @default(ONLINE)
 
-  /// Percentage of successful checks over the reporting window.
-  uptime Float @default(100)
-  /// Most recent observed response time, in milliseconds.
-  responseTime Int @default(0)
+  /// Null means the service is registered but not actively checked.
+  probeType   ProbeType?
+  /// Absolute URL for HTTP probes, or `host:port` for TCP probes.
+  probeTarget String?    @db.VarChar(2048)
+
+  probeIntervalSeconds Int @default(30)
+  probeTimeoutMs       Int @default(5000)
+
+  /// Inclusive HTTP status range treated as healthy.
+  expectedStatusMin Int @default(200)
+  expectedStatusMax Int @default(399)
+
+  /// Lets an operator silence a service without deleting its history.
+  isMonitored Boolean @default(true)
+
+  /// Hysteresis counters, maintained by the probe scheduler.
+  consecutiveFailures  Int @default(0)
+  consecutiveSuccesses Int @default(0)
+
+  lastCheckedAt DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  incidents Incident[]
+  incidents    Incident[]
+  probeResults ProbeResult[]
 
   @@index([status])
+  @@index([isMonitored, lastCheckedAt])
+}
+
+/// One reachability check.
+///
+/// This is the raw observation every health figure in the product is derived
+/// from. Nothing writes here except the probe scheduler.
+model ProbeResult {
+  /// Monotonic integer rather than a UUID. This table is append-only and read
+  /// in timestamp order; a sequential key keeps inserts at the right edge of
+  /// the B-tree instead of scattering them across it the way a random UUID
+  /// does. At the default interval a 32-bit key lasts centuries.
+  id Int @id @default(autoincrement())
+
+  serviceId String  @db.Uuid
+  service   Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  ok        Boolean
+  /// Round-trip time in milliseconds; null when the probe never connected.
+  latencyMs Int?
+  /// HTTP status observed, for HTTP probes only.
+  statusCode Int?
+  /// Failure reason, truncated. Null on success.
+  error String? @db.VarChar(500)
+
+  checkedAt DateTime @default(now())
+
+  /// Uptime and latency are always "one service, a time window, newest first".
+  @@index([serviceId, checkedAt(sort: Desc)])
+  @@index([checkedAt])
 }
 
 // ---------------------------------------------------------------------------
@@ -216,18 +281,31 @@ model Incident {
 // Telemetry
 // ---------------------------------------------------------------------------
 
+/// One host telemetry sample.
+///
+/// Written only by the host collector, from real readings taken through
+/// `systeminformation`. The previous implementation never wrote this table at
+/// all: the dashboard's chart was fed directly from a `Math.random()` generator
+/// in the WebSocket layer, so no measurement was ever recorded or recoverable.
 model Metric {
-  id String @id @default(uuid()) @db.Uuid
+  /// Sequential for the same reason as ProbeResult: append-only, time-ordered.
+  id Int @id @default(autoincrement())
 
-  /// Metric family, for example `cpu`, `memory`, `disk`, `network`.
-  type      String   @db.VarChar(60)
-  value     Float
-  host      String   @db.VarChar(200)
-  timestamp DateTime @default(now())
+  /// Metric family, for example `cpu`, `memory`, `disk`, `network_rx`.
+  type  String @db.VarChar(60)
+  value Float
+  /// Unit of `value`, so a consumer never has to infer it from the name.
+  unit  String @db.VarChar(20)
+  /// Identifies the machine the sample was taken on.
+  host  String @db.VarChar(200)
 
-  /// Time-series reads are always "one metric family, newest first, on one
-  /// host", so the composite index matches the access pattern exactly.
-  @@index([host, type, timestamp(sort: Desc)])
+  recordedAt DateTime @default(now())
+
+  /// Time-series reads are always "one metric family, one host, newest first",
+  /// so the composite index matches the access pattern exactly.
+  @@index([host, type, recordedAt(sort: Desc)])
+  /// Supports the retention sweep, which deletes purely by age.
+  @@index([recordedAt])
 }
 
 // ---------------------------------------------------------------------------

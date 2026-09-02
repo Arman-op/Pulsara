@@ -4,10 +4,45 @@ import { env } from './config/env';
 import { app } from './app';
 import { prisma } from './db/prisma';
 import { logger } from './lib/logger';
-import { createRealtimeServer, shutdownRealtimeServer } from './realtime/io';
+import { startHostCollector } from './modules/telemetry/host-collector';
+import { startProbeScheduler } from './modules/telemetry/probe-scheduler';
+import { startRetentionJob } from './modules/telemetry/retention';
+import {
+  RealtimeChannel,
+  createPublisher,
+  createRealtimeServer,
+  shutdownRealtimeServer,
+} from './realtime/io';
 
 const httpServer = createServer(app);
 const io = createRealtimeServer(httpServer);
+const publisher = createPublisher(io);
+
+/**
+ * Background workers.
+ *
+ * Each is independently switchable because they have genuinely different
+ * requirements: a test run wants neither, a replica behind a load balancer
+ * wants host collection on every instance (each has its own CPU and disk to
+ * report), and probing is a fleet-wide concern that should not be multiplied by
+ * replica count once this is scaled out.
+ */
+const hostCollector = env.METRICS_COLLECTION_ENABLED
+  ? startHostCollector((snapshot) => publisher.publish(RealtimeChannel.Metrics, snapshot))
+  : null;
+
+const probeScheduler = env.PROBES_ENABLED
+  ? startProbeScheduler((change) => publisher.publish(RealtimeChannel.ServiceStatus, change))
+  : null;
+
+const retentionJob = startRetentionJob();
+
+if (!hostCollector) {
+  logger.warn('Host metric collection is disabled; the telemetry chart will have no data');
+}
+if (!probeScheduler) {
+  logger.warn('Service probing is disabled; service health will not be measured');
+}
 
 httpServer.listen(env.PORT, () => {
   logger.info({ port: env.PORT, env: env.NODE_ENV }, 'Pulsara API listening');
@@ -40,6 +75,12 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
   forceExit.unref();
 
   try {
+    // Stop producing before stopping the transport, so nothing tries to publish
+    // to a closed socket server on the way out.
+    hostCollector?.stop();
+    probeScheduler?.stop();
+    retentionJob.stop();
+
     await shutdownRealtimeServer(io);
     await new Promise<void>((resolve, reject) => {
       httpServer.close((error) => (error ? reject(error) : resolve()));

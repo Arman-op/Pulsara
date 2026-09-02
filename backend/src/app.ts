@@ -14,6 +14,7 @@ import deploymentRoutes from './modules/deployments/deployments.routes';
 import healthRoutes from './modules/health/health.routes';
 import incidentRoutes from './modules/incidents/incidents.routes';
 import serviceRoutes from './modules/services/services.routes';
+import telemetryRoutes from './modules/telemetry/telemetry.routes';
 
 export const app = express();
 
@@ -81,6 +82,7 @@ app.use(`${API_PREFIX}/auth`, authRoutes);
 app.use(`${API_PREFIX}/deployments`, deploymentRoutes);
 app.use(`${API_PREFIX}/services`, serviceRoutes);
 app.use(`${API_PREFIX}/incidents`, incidentRoutes);
+app.use(`${API_PREFIX}/metrics`, telemetryRoutes);
 
 app.use(notFound);
 app.use(errorHandler);
