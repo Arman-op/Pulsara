@@ -94,7 +94,7 @@ backend/
       services/            Catalogue and probe configuration
       telemetry/           Host collector, probe scheduler, retention, reads
       deployments/         CI/CD history
-      incidents/           Incident feed
+      incidents/           Alerting engine, incident CRUD and timeline
     realtime/io.ts       Authenticated WebSocket transport and publisher
     app.ts               Middleware pipeline and route mounting
     server.ts            Listener, graceful shutdown, crash handling
@@ -325,7 +325,85 @@ browser history.
 
 ---
 
-## 8. HTTP contract
+## 8. Alerting: from an observation to an incident
+
+The probe scheduler emits a status transition; the alerting engine decides
+whether that transition is worth waking somebody for. Every incident it opens is
+backed by probe results a user can go and look at.
+
+For comparison, the previous system's incidents were two rows written by the
+seed script — "High latency on Background Workers" and "Database connection
+drop" — describing services that did not exist. They never changed and never
+resolved, because nothing was watching anything.
+
+### Deduplication is enforced by the database, not by application logic
+
+A flapping service produces a transition every probe interval. Naively opening
+an incident per transition would produce hundreds of them during one outage,
+which is how alerting systems get muted.
+
+Each automated incident carries a `dedupeKey` identifying the *condition*
+(`service-availability:<serviceId>`), and a partial unique index enforces the
+invariant:
+
+```sql
+CREATE UNIQUE INDEX "Incident_open_dedupe_unique"
+  ON "Incident" ("dedupeKey")
+  WHERE "isOpen" AND "dedupeKey" IS NOT NULL;
+```
+
+The check-then-insert in application code is a race: two scheduler ticks can
+both observe "no open incident" and both insert. The constraint makes the second
+insert fail, and the engine reads that failure as "already open" — which is the
+correct outcome, reached without a lock.
+
+The index is partial on purpose. Resolved incidents must be able to share a
+dedupe key with each other and with a new open one, because the same condition
+legitimately recurs. `isOpen` is a stored column rather than a derivation of
+`status` precisely because a partial index needs a concrete column to filter on;
+the API derives it from status on every write so the two can never disagree.
+
+### Severity escalates but never de-escalates
+
+The dedupe key is keyed on the service alone, not on the service *and* its
+state. A service sliding from `DEGRADED` to `OFFLINE` therefore escalates the
+incident it already has rather than opening a second one for the same outage,
+and the title is restated so a list view does not still read "is degraded" for a
+service that is fully down.
+
+Severity only ever rises while an incident is open. Downgrading a `CRITICAL`
+outage because one probe happened to succeed would quietly drop it below
+whatever threshold a human is watching, in the middle of the outage.
+
+### Only what the engine opened, the engine may close
+
+Recovery auto-resolves incidents with `source = AUTOMATED`. A manually raised
+incident is left alone: a person may be tracking something the probe cannot see,
+and closing their investigation because one endpoint answered 200 would be worse
+than leaving it open.
+
+Entering `MAINTENANCE` opens nothing — it is a planned action — but it does not
+close anything either, because a service that was genuinely broken before the
+window began is still broken.
+
+### The timeline is the postmortem
+
+An incident row shows only its current state. `IncidentEvent` records what
+happened and when: opened, escalated, assigned, commented, resolved, reopened.
+Every mutation writes its timeline entry in the same transaction as the change
+itself, so the two cannot diverge — a timeline that is sometimes wrong is worth
+less than no timeline at all.
+
+### Alerting failures never stop monitoring
+
+`handleServiceStatusChange` catches and logs rather than propagating. A bug in
+alerting must not take down the probe loop that feeds it, because the
+observations remain correct and useful even when the alerting on top of them
+is not.
+
+---
+
+## 9. HTTP contract
 
 Every endpoint returns the same envelope:
 
@@ -349,7 +427,7 @@ the server log, so a user-reported failure maps to a log entry directly.
 
 ---
 
-## 9. Observability and lifecycle
+## 10. Observability and lifecycle
 
 - **Logging**: pino, newline-delimited JSON, with authorization headers,
   cookies and password fields redacted at the logger rather than at each call
@@ -365,7 +443,7 @@ the server log, so a user-reported failure maps to a log entry directly.
 
 ---
 
-## 10. Implementation status
+## 11. Implementation status
 
 | Area | State |
 | :--- | :--- |
@@ -378,7 +456,7 @@ the server log, so a user-reported failure maps to a log entry directly.
 | Derived uptime and latency percentiles | Implemented |
 | Authenticated realtime stream | Implemented |
 | Telemetry retention | Implemented |
-| Incident/alerting engine | **Not yet implemented** |
+| Incident/alerting engine | Implemented |
 | GitHub Actions integration | **Not yet implemented** |
 | Automated tests | **Not yet implemented** |
 | Container images and CI | **Not yet implemented** |

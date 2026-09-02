@@ -4,6 +4,7 @@ import { env } from './config/env';
 import { app } from './app';
 import { prisma } from './db/prisma';
 import { logger } from './lib/logger';
+import { handleServiceStatusChange } from './modules/incidents/incident-engine';
 import { startHostCollector } from './modules/telemetry/host-collector';
 import { startProbeScheduler } from './modules/telemetry/probe-scheduler';
 import { startRetentionJob } from './modules/telemetry/retention';
@@ -32,7 +33,12 @@ const hostCollector = env.METRICS_COLLECTION_ENABLED
   : null;
 
 const probeScheduler = env.PROBES_ENABLED
-  ? startProbeScheduler((change) => publisher.publish(RealtimeChannel.ServiceStatus, change))
+  ? startProbeScheduler((change) => {
+      publisher.publish(RealtimeChannel.ServiceStatus, change);
+      // The alerting engine reacts to the same transitions the UI sees, so an
+      // incident is always backed by a status change a user can point at.
+      void handleServiceStatusChange(change);
+    })
   : null;
 
 const retentionJob = startRetentionJob();

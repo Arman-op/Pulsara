@@ -201,7 +201,12 @@ All routes are under `/api`. Every response uses the same envelope:
 | `GET` | `/metrics/latest` | Bearer | Most recent sample of each metric family |
 | `GET` | `/metrics/hosts` | Bearer | Hosts that have reported samples |
 | `GET` | `/deployments` | Bearer | Deployment history (`limit`, `offset`) |
-| `GET` | `/incidents` | Bearer | Incident feed (`limit`, `offset`) |
+| `GET` | `/incidents` | Bearer | Feed (`limit`, `offset`, `status`, `severity`, `serviceId`, `isOpen`) |
+| `GET` | `/incidents/summary` | Bearer | Open/resolved counts by severity |
+| `GET` | `/incidents/:id` | Bearer | One incident with its full timeline |
+| `POST` | `/incidents` | MEMBER | Raise an incident by hand |
+| `PATCH` | `/incidents/:id` | MEMBER | Change status, severity or assignee |
+| `POST` | `/incidents/:id/comments` | MEMBER | Append a note to the timeline |
 
 ---
 
@@ -211,10 +216,11 @@ Implemented: configuration and secrets hygiene, PostgreSQL with versioned
 migrations, authentication with rotation and RBAC, the error contract,
 structured logging, health probes, graceful shutdown, real host telemetry
 collection, service probing with a hysteresis state machine, derived uptime and
-latency percentiles, retention, and an authenticated realtime stream.
+latency percentiles, retention, an authenticated realtime stream, and an
+alerting engine that opens and resolves incidents from observed outages.
 
-Not yet implemented: the alerting engine, the GitHub Actions integration,
-automated tests, and container images with CI.
+Not yet implemented: the GitHub Actions integration, automated tests, and
+container images with CI.
 [ARCHITECTURE.md](./ARCHITECTURE.md) tracks the current state precisely.
 
 ---

@@ -113,17 +113,52 @@ export type Deployment = {
   stages: Stage[];
 };
 
+/// Whether an incident was raised by the alerting engine or by a person.
+export type IncidentSource = 'AUTOMATED' | 'MANUAL';
+
+export type IncidentEventKind =
+  | 'OPENED'
+  | 'STATUS_CHANGED'
+  | 'SEVERITY_CHANGED'
+  | 'ASSIGNED'
+  | 'COMMENTED'
+  | 'RESOLVED'
+  | 'REOPENED';
+
+/** One entry in an incident timeline. */
+export type IncidentEvent = {
+  id: number;
+  incidentId: string;
+  kind: IncidentEventKind;
+  message: string;
+  actorId: string | null;
+  createdAt: string;
+};
+
 export type Incident = {
   id: string;
   title: string;
   description: string | null;
   severity: Severity;
   status: IncidentStatus;
+  source: IncidentSource;
+  /** True while the incident counts as open; drives ordering and filtering. */
+  isOpen: boolean;
   service: Pick<Service, 'id' | 'name' | 'status'> | null;
   assignee: Pick<AuthUser, 'id' | 'name' | 'email' | 'avatarUrl'> | null;
   resolvedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Present only on the single-incident endpoint. */
+  events?: IncidentEvent[];
+};
+
+/** Aggregated counts for the dashboard summary. */
+export type IncidentSummary = {
+  total: number;
+  open: number;
+  resolved: number;
+  openBySeverity: Partial<Record<Severity, number>>;
 };
 
 /**

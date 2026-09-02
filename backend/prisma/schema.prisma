@@ -170,13 +170,13 @@ model ProbeResult {
   serviceId String  @db.Uuid
   service   Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
 
-  ok        Boolean
+  ok         Boolean
   /// Round-trip time in milliseconds; null when the probe never connected.
-  latencyMs Int?
+  latencyMs  Int?
   /// HTTP status observed, for HTTP probes only.
   statusCode Int?
   /// Failure reason, truncated. Null on success.
-  error String? @db.VarChar(500)
+  error      String? @db.VarChar(500)
 
   checkedAt DateTime @default(now())
 
@@ -203,7 +203,7 @@ model Deployment {
   repo   String @db.VarChar(200)
   branch String @db.VarChar(200)
 
-  status DeploymentStatus @default(PENDING)
+  status   DeploymentStatus @default(PENDING)
   /// Wall-clock duration in seconds; null while the run is still in flight.
   duration Int?
 
@@ -254,6 +254,14 @@ enum IncidentStatus {
   RESOLVED
 }
 
+/// Where an incident came from.
+enum IncidentSource {
+  /// Opened by the alerting engine from observed probe results.
+  AUTOMATED
+  /// Opened by a person.
+  MANUAL
+}
+
 model Incident {
   id String @id @default(uuid()) @db.Uuid
 
@@ -262,6 +270,7 @@ model Incident {
 
   severity Severity
   status   IncidentStatus @default(INVESTIGATING)
+  source   IncidentSource @default(MANUAL)
 
   serviceId String?  @db.Uuid
   service   Service? @relation(fields: [serviceId], references: [id], onDelete: SetNull)
@@ -269,12 +278,60 @@ model Incident {
   assigneeId String? @db.Uuid
   assignee   User?   @relation("IncidentAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
 
+  /// Identity of the *condition*, not of this occurrence.
+  ///
+  /// The alerting engine writes one key per (service, condition). Combined with
+  /// the partial unique index below it guarantees at most one open automated
+  /// incident per condition, so a service flapping every thirty seconds
+  /// produces one incident rather than one per probe.
+  dedupeKey String? @db.VarChar(200)
+
+  /// True while the incident counts as open. Stored rather than derived from
+  /// the status enum, because a partial unique index needs a concrete column,
+  /// and because being open is the concept the deduplication rule is about.
+  isOpen Boolean @default(true)
+
   resolvedAt DateTime?
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
 
+  events IncidentEvent[]
+
   @@index([status, createdAt(sort: Desc)])
-  @@index([serviceId])
+  @@index([serviceId, isOpen])
+  @@index([isOpen, severity])
+}
+
+/// What happened to an incident, and when.
+///
+/// An incident row only shows the current state. The timeline is what makes a
+/// postmortem possible: when it opened, who picked it up, what changed, when it
+/// resolved and how long that took.
+model IncidentEvent {
+  id Int @id @default(autoincrement())
+
+  incidentId String   @db.Uuid
+  incident   Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+
+  kind    IncidentEventKind
+  message String            @db.VarChar(1000)
+
+  /// Null when the alerting engine acted rather than a person.
+  actorId String? @db.Uuid
+
+  createdAt DateTime @default(now())
+
+  @@index([incidentId, createdAt])
+}
+
+enum IncidentEventKind {
+  OPENED
+  STATUS_CHANGED
+  SEVERITY_CHANGED
+  ASSIGNED
+  COMMENTED
+  RESOLVED
+  REOPENED
 }
 
 // ---------------------------------------------------------------------------
