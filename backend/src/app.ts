@@ -15,6 +15,7 @@ import githubWebhookRoutes from './modules/github/github.webhook.routes';
 import deploymentRoutes from './modules/deployments/deployments.routes';
 import healthRoutes from './modules/health/health.routes';
 import incidentRoutes from './modules/incidents/incidents.routes';
+import prometheusRoutes from './modules/metrics/prometheus.routes';
 import serviceRoutes from './modules/services/services.routes';
 import telemetryRoutes from './modules/telemetry/telemetry.routes';
 import userRoutes from './modules/users/users.routes';
@@ -99,6 +100,19 @@ app.use(express.json({ limit: MAX_REQUEST_BODY_BYTES }));
 app.use(express.urlencoded({ extended: false, limit: MAX_REQUEST_BODY_BYTES }));
 app.use(cookieParser());
 app.use(requestLogger);
+
+/**
+ * The scrape endpoint sits at the root, outside the API prefix and outside the
+ * JSON envelope, because `/metrics` is the path every Prometheus installation
+ * already tries and the exposition format is text with its own content type.
+ *
+ * It is also mounted before the API routes so that its path can never be
+ * shadowed: `/api/metrics` is the dashboard's own time-series read endpoint,
+ * and the two would be a confusing pair of neighbours if they shared a prefix.
+ */
+if (env.PROMETHEUS_METRICS_ENABLED) {
+  app.use('/metrics', prometheusRoutes);
+}
 
 app.use(`${API_PREFIX}/health`, healthRoutes);
 app.use(`${API_PREFIX}/auth`, authRoutes);
