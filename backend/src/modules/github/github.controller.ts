@@ -1,7 +1,12 @@
 import { AuditAction } from '@prisma/client';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
-import { isGitHubPollingConfigured, isGitHubWebhookConfigured } from '../../config/env';
+import {
+  env,
+  githubAuthMode,
+  isGitHubPollingConfigured,
+  isGitHubWebhookConfigured,
+} from '../../config/env';
 import { prisma } from '../../db/prisma';
 import { recordAudit } from '../../lib/audit';
 import { NotFoundError } from '../../lib/errors';
@@ -37,6 +42,13 @@ export function getIntegrationStatus(_req: Request, res: Response): void {
   sendSuccess(res, {
     pollingConfigured: isGitHubPollingConfigured,
     webhookConfigured: isGitHubWebhookConfigured,
+    /**
+     * Which credential is in use, so an operator can confirm from the UI that a
+     * migration from a personal token to an App actually took effect. No secret
+     * is disclosed by the name of the mechanism.
+     */
+    authMode: githubAuthMode,
+    monitoredRepository: env.GITHUB_MONITORED_REPO,
   });
 }
 
@@ -60,6 +72,8 @@ export async function listConnections(_req: Request, res: Response): Promise<voi
   sendSuccess(res, connections, {
     pollingConfigured: isGitHubPollingConfigured,
     webhookConfigured: isGitHubWebhookConfigured,
+    authMode: githubAuthMode,
+    monitoredRepository: env.GITHUB_MONITORED_REPO,
   });
 }
 

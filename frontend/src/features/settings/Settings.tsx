@@ -1,7 +1,7 @@
 import { Github, Link as LinkIcon, Monitor, Shield, Trash2, User } from 'lucide-react';
 import * as React from 'react';
 import { ApiError, apiRequest, signOut } from '../../shared/api/client';
-import type { AuthUser, RepoConnection } from '../../shared/api/types';
+import type { AuthUser, GitHubIntegrationMeta, RepoConnection } from '../../shared/api/types';
 import { useApi } from '../../shared/api/useApi';
 import { Button } from '../../shared/components/Button';
 import { Card, CardContent, CardHeader, CardTitle } from '../../shared/components/Card';
@@ -32,7 +32,14 @@ type Session = {
   expiresAt: string;
 };
 
-type ConnectionMeta = { pollingConfigured: boolean; webhookConfigured: boolean };
+type ConnectionMeta = GitHubIntegrationMeta;
+
+/** How each credential presents itself in the panel. */
+const AUTH_MODE_LABEL: Record<GitHubIntegrationMeta['authMode'], string> = {
+  app: 'GitHub App installation',
+  token: 'Personal access token',
+  none: 'not configured',
+};
 
 const TABS = [
   { id: 'profile', label: 'Profile', icon: User },
@@ -357,11 +364,15 @@ function IntegrationsPanel() {
         {meta && (
           <div className="text-xs text-muted space-y-1 p-3 rounded-lg bg-surface border border-border">
             <p>
-              API token:{' '}
+              Credential:{' '}
               <span className={meta.pollingConfigured ? 'text-success' : 'text-warning'}>
-                {meta.pollingConfigured ? 'configured' : 'not configured'}
+                {AUTH_MODE_LABEL[meta.authMode]}
               </span>{' '}
               — required to read run history.
+            </p>
+            <p>
+              Monitored by default: <span className="text-white">{meta.monitoredRepository}</span> —
+              connected and backfilled at startup.
             </p>
             <p>
               Webhook secret:{' '}

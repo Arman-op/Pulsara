@@ -146,6 +146,16 @@ export type DeploymentListMeta = PageMeta & {
   webhookConfigured: boolean;
 };
 
+/** How the API authenticates to GitHub, reported so the UI can name it. */
+export type GitHubAuthMode = 'app' | 'token' | 'none';
+
+export type GitHubIntegrationMeta = {
+  pollingConfigured: boolean;
+  webhookConfigured: boolean;
+  authMode: GitHubAuthMode;
+  monitoredRepository: string;
+};
+
 export type RepoConnection = {
   id: string;
   provider: CiProvider;
