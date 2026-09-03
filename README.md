@@ -276,9 +276,11 @@ Implemented: configuration and secrets hygiene, PostgreSQL with versioned
 migrations, authentication with rotation and RBAC, the error contract,
 structured logging, health probes, graceful shutdown, real host telemetry
 collection, service probing with a hysteresis state machine, derived uptime and
-latency percentiles, retention, an authenticated realtime stream, and an
-alerting engine that opens and resolves incidents from observed outages, and a
-GitHub Actions integration with signed webhooks and reconciling backfill.
+latency percentiles, retention, an authenticated realtime stream, an alerting
+engine that opens and resolves incidents from observed outages, a GitHub Actions
+integration with signed webhooks and reconciling backfill, and a web client that
+reads all of it through a single API layer with no token in `localStorage` and
+no placeholder rows.
 
 Not yet implemented: automated tests, and container images with CI.
 [ARCHITECTURE.md](./ARCHITECTURE.md) tracks the current state precisely.

@@ -104,10 +104,25 @@ backend/
 frontend/
   src/
     config/env.ts        Zod-validated build-time environment
-    shared/api/types.ts  The API contract, written down once
-    shared/components/   Presentational primitives
-    shared/store/        Zustand stores
+    shared/
+      api/
+        types.ts         The API contract, written down once
+        client.ts        The only place a request is sent or a token is read
+        useApi.ts        Loading/error/empty/loaded state for a read endpoint
+        useRealtime.ts   One socket subscription, re-opened on token rotation
+        socket.ts        Authenticated Socket.IO handshake
+      components/        Presentational primitives and route guards
+      store/             Zustand stores (session, toasts)
+    app/Sidebar.tsx      Role-filtered navigation
     features/            One folder per screen
+      auth/                Sign-in (password and Google)
+      dashboard/           Summary tiles and open incidents
+      infrastructure/      Telemetry chart and service health map
+      pipelines/           GitHub Actions runs
+      alerts/              Incident feed, detail drawer and timeline
+      users/               Administration (ADMIN only)
+      settings/            Profile, security, sessions, integrations
+      notfound/            404 inside the app shell
 ```
 
 Modules are grouped by **domain**, not by technical layer. A change to how
@@ -555,7 +570,61 @@ the server log, so a user-reported failure maps to a log entry directly.
 
 ---
 
-## 11. Observability and lifecycle
+## 11. The web client
+
+The client is a Vite + React single-page app. Three decisions shape it.
+
+### One place sends requests
+
+`shared/api/client.ts` is the only module that knows the access token exists or
+that `fetch` is being called. Screens use `useApi` for reads and `apiRequest`
+for writes. This is not tidiness for its own sake: when a 401 comes back, the
+client has to refresh the session and replay the request exactly once, and that
+is impossible to get right if a dozen components each hold their own copy of the
+token and call `fetch` directly — which is what they previously did.
+
+Refresh is single-flight. Ten polling components hitting an expired token
+produce ten 401s within the same tick; without a shared in-flight promise they
+would trigger ten concurrent rotations, and rotation with reuse detection reads
+concurrent rotations as a stolen token and revokes the whole family. The user
+would be signed out for having too many charts open.
+
+Two paths deliberately bypass the client: sign-in, which has no session to
+refresh, and the WebSocket handshake, which authenticates once at connect time.
+`useRealtime` re-opens the socket when the token rotates, because a connection
+authenticated with an expired token keeps working until it drops and then fails
+every reconnect attempt.
+
+### Nothing is stored in `localStorage`
+
+The access token lives in memory only, and the refresh token is an HttpOnly
+cookie the JavaScript cannot read. A token in `localStorage` is readable by any
+script the page ever loads; a token in a closure is not.
+
+The cost is that a page reload starts with no token, so the app has a
+three-state session: `bootstrapping`, `authenticated`, `anonymous`. It exchanges
+the cookie for an access token before rendering any route, and shows a splash
+while it does. Without that third state the router would see "no token" during
+the first frame and bounce an authenticated user to the login screen on every
+refresh.
+
+### Absence is rendered as absence
+
+Every screen distinguishes four states — loading, error, empty, loaded — and an
+unmeasured value renders as an em dash, never as zero or a plausible-looking
+default. The service map used to fall back to a hard-coded array of six
+healthy-looking services when its request failed, which meant a dead API and a
+healthy fleet looked identical. Fleet uptime averages only over services that
+have actually been probed, because counting an unprobed service as 100% inflates
+the figure with data that does not exist.
+
+Empty states say what would fill them ("the alerting engine opens one
+automatically when a monitored service stops responding") so that empty reads as
+a working system with nothing to report rather than as a broken one.
+
+---
+
+## 12. Observability and lifecycle
 
 - **Logging**: pino, newline-delimited JSON, with authorization headers,
   cookies and password fields redacted at the logger rather than at each call
@@ -571,7 +640,7 @@ the server log, so a user-reported failure maps to a log entry directly.
 
 ---
 
-## 12. Implementation status
+## 13. Implementation status
 
 | Area | State |
 | :--- | :--- |
@@ -586,6 +655,7 @@ the server log, so a user-reported failure maps to a log entry directly.
 | Telemetry retention | Implemented |
 | Incident/alerting engine | Implemented |
 | GitHub Actions integration | Implemented |
+| Web client on the real API | Implemented |
 | Automated tests | **Not yet implemented** |
 | Container images and CI | **Not yet implemented** |
 
