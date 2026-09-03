@@ -1,11 +1,11 @@
 import * as React from 'react';
-import { env } from '../../../config/env';
-import { RealtimeChannel, createAuthenticatedSocket } from '../../../shared/api/socket';
-import type { ApiResponse, Service, ServiceStatusChange } from '../../../shared/api/types';
+import { RealtimeChannel } from '../../../shared/api/socket';
+import type { Service, ServiceState, ServiceStatusChange } from '../../../shared/api/types';
+import { useApi } from '../../../shared/api/useApi';
+import { useRealtime } from '../../../shared/api/useRealtime';
 import { Card, CardContent, CardHeader, CardTitle } from '../../../shared/components/Card';
 import { Drawer } from '../../../shared/components/Drawer';
 import { StatusDot } from '../../../shared/components/StatusDot';
-import { useAuthStore } from '../../../shared/store/authStore';
 
 /**
  * Service health map.
@@ -22,6 +22,11 @@ import { useAuthStore } from '../../../shared/store/authStore';
 
 type ServiceMeta = { uptimeWindowHours: number; probesEnabled: boolean };
 
+/** Uptime and latency are windowed aggregates; refresh them periodically. */
+const POLL_MS = 30_000;
+
+const DEFAULT_UPTIME_WINDOW_HOURS = 24;
+
 function formatUptime(percent: number | null): string {
   if (percent === null) return '—';
   // Two decimals: the gap between 99.95% and 99.99% is roughly 17 minutes of
@@ -33,7 +38,7 @@ function formatLatency(ms: number | null): string {
   return ms === null ? '—' : `${ms}ms`;
 }
 
-function statusTone(status: Service['status']): 'online' | 'warning' | 'offline' {
+function statusTone(status: ServiceState): 'online' | 'warning' | 'offline' {
   switch (status) {
     case 'ONLINE':
       return 'online';
@@ -45,69 +50,46 @@ function statusTone(status: Service['status']): 'online' | 'warning' | 'offline'
 }
 
 export function SystemHealthMap() {
-  const [services, setServices] = React.useState<Service[]>([]);
-  const [meta, setMeta] = React.useState<ServiceMeta | null>(null);
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
-  const [loadError, setLoadError] = React.useState<string | null>(null);
-  const [isLoading, setIsLoading] = React.useState(true);
-  const accessToken = useAuthStore((store) => store.accessToken);
-
-  React.useEffect(() => {
-    if (!accessToken) return;
-    let cancelled = false;
-
-    const load = async () => {
-      try {
-        const res = await fetch(`${env.VITE_API_URL}/api/services`, {
-          headers: { Authorization: `Bearer ${accessToken}` },
-        });
-        const body = (await res.json()) as ApiResponse<Service[]>;
-        if (cancelled) return;
-
-        if (body.success) {
-          setServices(body.data);
-          setMeta((body.meta as unknown as ServiceMeta) ?? null);
-          setLoadError(null);
-        } else {
-          setLoadError(body.error.message);
-        }
-      } catch {
-        if (!cancelled) setLoadError('The service catalogue could not be reached.');
-      } finally {
-        if (!cancelled) setIsLoading(false);
-      }
-    };
-
-    void load();
-    return () => {
-      cancelled = true;
-    };
-  }, [accessToken]);
+  const { data, meta, isLoading, error } = useApi<Service[], ServiceMeta>('/services', {
+    pollMs: POLL_MS,
+  });
 
   /**
    * Status transitions arrive over the socket, so a service going down updates
-   * without waiting for a refresh. Only `status` is patched: uptime and latency
-   * are windowed aggregates the server owns, and recomputing them in the
-   * browser from a single event would produce a number the server disagrees
-   * with.
+   * without waiting for the next poll. Only `status` is patched: uptime and
+   * latency are windowed aggregates the server owns, and recomputing them in
+   * the browser from a single event would produce a number the server
+   * disagrees with.
    */
-  React.useEffect(() => {
-    const socket = createAuthenticatedSocket();
-    if (!socket) return;
+  const [liveStatus, setLiveStatus] = React.useState<Record<string, ServiceState>>({});
 
-    socket.on(RealtimeChannel.ServiceStatus, (change: ServiceStatusChange) => {
-      setServices((previous) =>
-        previous.map((service) =>
-          service.id === change.serviceId ? { ...service, status: change.current } : service,
-        ),
-      );
-    });
+  useRealtime<ServiceStatusChange>(RealtimeChannel.ServiceStatus, (change) => {
+    setLiveStatus((previous) => ({ ...previous, [change.serviceId]: change.current }));
+  });
 
-    return () => {
-      socket.close();
-    };
-  }, [accessToken]);
+  /**
+   * A completed fetch is ground truth, so the socket patches accumulated in the
+   * meantime are dropped rather than left to shadow it. This is React's
+   * adjust-state-during-render pattern: doing it in an effect would render one
+   * frame of fresh data still wearing stale overrides.
+   */
+  const [renderedData, setRenderedData] = React.useState(data);
+  if (renderedData !== data) {
+    setRenderedData(data);
+    setLiveStatus({});
+  }
 
+  const services = React.useMemo(
+    () =>
+      (data ?? []).map((service) => {
+        const live = liveStatus[service.id];
+        return live ? { ...service, status: live } : service;
+      }),
+    [data, liveStatus],
+  );
+
+  const uptimeWindowHours = meta?.uptimeWindowHours ?? DEFAULT_UPTIME_WINDOW_HOURS;
   const selected = services.find((service) => service.id === selectedId) ?? null;
 
   return (
@@ -124,9 +106,9 @@ export function SystemHealthMap() {
       <CardContent>
         {isLoading ? (
           <p className="py-8 text-center text-sm text-muted">Loading service catalogue…</p>
-        ) : loadError ? (
+        ) : error ? (
           <p className="py-8 text-center text-sm text-danger" role="alert">
-            {loadError}
+            {error}
           </p>
         ) : services.length === 0 ? (
           <p className="py-8 text-center text-sm text-muted">
@@ -178,7 +160,7 @@ export function SystemHealthMap() {
 
             <div className="p-4 rounded-md bg-surface border border-border">
               <h4 className="font-semibold text-white mb-2">
-                Measured over the last {meta?.uptimeWindowHours ?? 24}h
+                Measured over the last {uptimeWindowHours}h
               </h4>
               <dl className="space-y-2 text-muted">
                 <div className="flex justify-between">

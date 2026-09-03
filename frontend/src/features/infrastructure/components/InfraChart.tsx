@@ -8,21 +8,16 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { env } from '../../../config/env';
-import { RealtimeChannel, createAuthenticatedSocket } from '../../../shared/api/socket';
-import type {
-  ApiResponse,
-  HostSnapshot,
-  MetricSeriesMeta,
-  MetricSeriesPoint,
-} from '../../../shared/api/types';
+import { RealtimeChannel } from '../../../shared/api/socket';
+import type { HostSnapshot, MetricSeriesMeta, MetricSeriesPoint } from '../../../shared/api/types';
+import { useApi } from '../../../shared/api/useApi';
+import { useRealtime } from '../../../shared/api/useRealtime';
 import { Card, CardContent, CardHeader, CardTitle } from '../../../shared/components/Card';
-import { useAuthStore } from '../../../shared/store/authStore';
 
 /**
  * Host telemetry chart.
  *
- * Two changes of substance from the previous version:
+ * Two changes of substance from the original version:
  *
  * 1. The data is real. It was previously fed by a `Math.random()` generator on
  *    the server, bounded to look plausible, so the chart could never show a
@@ -32,11 +27,12 @@ import { useAuthStore } from '../../../shared/store/authStore';
  *    never answer "what happened five minutes ago" — the single most common
  *    question asked of a telemetry chart.
  *
- * Recorded history is fetched once, then the socket appends live samples to it.
+ * Recorded history is fetched through the shared API client, and the socket
+ * appends live samples on top of it.
  */
 
-/** How much history to load on mount. */
-const HISTORY_MINUTES = 30;
+/** Default history window; the Infrastructure view offers wider ones. */
+export const DEFAULT_WINDOW_MINUTES = 30;
 /** Upper bound on points requested; the server buckets the range to fit. */
 const HISTORY_MAX_POINTS = 180;
 /**
@@ -83,80 +79,60 @@ function fromSnapshot(snapshot: HostSnapshot): ChartPoint {
   };
 }
 
-type LoadState = 'loading' | 'ready' | 'error';
-
-export function InfraChart() {
-  const [points, setPoints] = React.useState<ChartPoint[]>([]);
-  const [latest, setLatest] = React.useState<HostSnapshot | null>(null);
-  const [meta, setMeta] = React.useState<MetricSeriesMeta | null>(null);
-  const [state, setState] = React.useState<LoadState>('loading');
-  const [streamError, setStreamError] = React.useState<string | null>(null);
-  const accessToken = useAuthStore((store) => store.accessToken);
-
-  // Load recorded history once per session.
-  React.useEffect(() => {
-    if (!accessToken) return;
-    let cancelled = false;
-
-    const loadHistory = async () => {
-      const to = new Date();
-      const from = new Date(to.getTime() - HISTORY_MINUTES * MS_PER_MINUTE);
-      const query = new URLSearchParams({
-        from: from.toISOString(),
-        to: to.toISOString(),
-        types: 'cpu,memory,disk',
-        maxPoints: String(HISTORY_MAX_POINTS),
-      });
-
-      try {
-        const res = await fetch(`${env.VITE_API_URL}/api/metrics/series?${query.toString()}`, {
-          headers: { Authorization: `Bearer ${accessToken}` },
-        });
-        const body = (await res.json()) as ApiResponse<MetricSeriesPoint[]>;
-        if (cancelled) return;
-
-        if (body.success) {
-          setPoints(body.data.map(fromSeriesPoint));
-          setMeta((body.meta as unknown as MetricSeriesMeta) ?? null);
-          setState('ready');
-        } else {
-          setState('error');
-        }
-      } catch {
-        if (!cancelled) setState('error');
-      }
-    };
-
-    void loadHistory();
-    return () => {
-      cancelled = true;
-    };
-  }, [accessToken]);
-
-  // Append live samples as they arrive.
-  React.useEffect(() => {
-    const socket = createAuthenticatedSocket();
-    if (!socket) return;
-
-    socket.on('connect', () => setStreamError(null));
-    socket.on('connect_error', (error: Error) => setStreamError(error.message));
-
-    socket.on(RealtimeChannel.Metrics, (snapshot: HostSnapshot) => {
-      setLatest(snapshot);
-      setPoints((previous) => {
-        const next = [...previous, fromSnapshot(snapshot)];
-        return next.length > MAX_POINTS_IN_MEMORY
-          ? next.slice(next.length - MAX_POINTS_IN_MEMORY)
-          : next;
-      });
+export function InfraChart({ windowMinutes = DEFAULT_WINDOW_MINUTES }: { windowMinutes?: number }) {
+  /**
+   * The window is anchored when the range changes rather than on every render,
+   * so the request path is stable and the history is fetched once per window
+   * instead of on a loop.
+   */
+  const historyPath = React.useMemo(() => {
+    const to = new Date();
+    const from = new Date(to.getTime() - windowMinutes * MS_PER_MINUTE);
+    const query = new URLSearchParams({
+      from: from.toISOString(),
+      to: to.toISOString(),
+      types: 'cpu,memory,disk',
+      maxPoints: String(HISTORY_MAX_POINTS),
     });
+    return `/metrics/series?${query.toString()}`;
+  }, [windowMinutes]);
 
-    return () => {
-      socket.close();
-    };
-  }, [accessToken]);
+  const history = useApi<MetricSeriesPoint[], MetricSeriesMeta>(historyPath);
 
-  const collectorDisabled = meta?.collectorEnabled === false;
+  const [live, setLive] = React.useState<ChartPoint[]>([]);
+  const [latest, setLatest] = React.useState<HostSnapshot | null>(null);
+
+  /**
+   * Live samples are discarded when the window changes, because the refetch
+   * that follows already covers the period they came from. Adjusting during
+   * render rather than in an effect avoids a frame in which the chart shows the
+   * new window's history with the old window's tail glued onto it.
+   */
+  const [renderedPath, setRenderedPath] = React.useState(historyPath);
+  if (renderedPath !== historyPath) {
+    setRenderedPath(historyPath);
+    setLive([]);
+  }
+
+  const { streamError } = useRealtime<HostSnapshot>(RealtimeChannel.Metrics, (snapshot) => {
+    setLatest(snapshot);
+    setLive((previous) => {
+      const next = [...previous, fromSnapshot(snapshot)];
+      return next.length > MAX_POINTS_IN_MEMORY
+        ? next.slice(next.length - MAX_POINTS_IN_MEMORY)
+        : next;
+    });
+  });
+
+  const points = React.useMemo(() => {
+    const recorded = (history.data ?? []).map(fromSeriesPoint);
+    const combined = [...recorded, ...live];
+    return combined.length > MAX_POINTS_IN_MEMORY
+      ? combined.slice(combined.length - MAX_POINTS_IN_MEMORY)
+      : combined;
+  }, [history.data, live]);
+
+  const collectorDisabled = history.meta?.collectorEnabled === false;
 
   return (
     <Card className="col-span-1 md:col-span-2 lg:col-span-3">
@@ -165,7 +141,7 @@ export function InfraChart() {
           <CardTitle>Host Telemetry</CardTitle>
           <p className="text-xs text-muted mt-1">
             {latest ? `Live from ${latest.host}` : 'Recorded host metrics'}
-            {meta ? ` · ${meta.bucketSeconds}s buckets` : ''}
+            {history.meta ? ` · ${history.meta.bucketSeconds}s buckets` : ''}
           </p>
         </div>
         {latest && (
@@ -178,16 +154,16 @@ export function InfraChart() {
       </CardHeader>
       <CardContent>
         <div className="h-[240px] w-full pt-4">
-          {state === 'loading' ? (
+          {history.isLoading ? (
             <div className="h-full flex items-center justify-center text-muted text-sm">
               Loading recorded telemetry…
             </div>
-          ) : state === 'error' ? (
+          ) : history.error ? (
             <div
               className="h-full flex items-center justify-center text-danger text-sm"
               role="alert"
             >
-              Telemetry could not be loaded.
+              {history.error}
             </div>
           ) : points.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-muted text-sm gap-1">
