@@ -45,6 +45,15 @@ model User {
   avatarUrl String? @db.VarChar(2048)
   isActive  Boolean @default(true)
 
+  /// Access tokens issued before this moment are refused.
+  ///
+  /// Revoking refresh tokens ends a session's ability to *renew*, but an access
+  /// token already in someone's hands stays cryptographically valid until it
+  /// expires. Without this field, "sign out everywhere" left a stolen token
+  /// working for the rest of its lifetime — which is exactly the window the
+  /// person clicking it is trying to close.
+  sessionsValidFrom DateTime?
+
   lastLoginAt DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt

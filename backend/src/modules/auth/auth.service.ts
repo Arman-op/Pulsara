@@ -6,6 +6,7 @@ import { env, isFirebaseConfigured } from '../../config/env';
 import { prisma } from '../../db/prisma';
 import { ForbiddenError, UnauthenticatedError, UpstreamUnavailableError } from '../../lib/errors';
 import { logger } from '../../lib/logger';
+import { invalidatePrincipal } from './principal';
 import type { AuthenticatedUser } from './auth.types';
 import { verifyFirebaseIdToken } from './firebase';
 import { hashPassword, verifyPassword } from './password';
@@ -119,10 +120,26 @@ async function issueSession(
  * throw is meant to enforce.
  */
 export async function revokeAllSessionsForUser(userId: string): Promise<void> {
-  await prisma.refreshToken.updateMany({
-    where: { userId, revokedAt: null },
-    data: { revokedAt: new Date() },
-  });
+  const revokedAt = new Date();
+
+  /**
+   * Both halves, in one transaction. Revoking the refresh tokens ends a
+   * session's ability to *renew*; stamping `sessionsValidFrom` is what stops
+   * the access tokens already in someone's hands, which stay cryptographically
+   * valid until they expire. Doing only the first left a stolen token working
+   * for the rest of its lifetime — the exact window this is meant to close.
+   */
+  await prisma.$transaction([
+    prisma.refreshToken.updateMany({
+      where: { userId, revokedAt: null },
+      data: { revokedAt },
+    }),
+    prisma.user.update({ where: { id: userId }, data: { sessionsValidFrom: revokedAt } }),
+  ]);
+
+  // Explicit rather than left to a TTL: a revocation that takes effect in ten
+  // seconds is a revocation that does not work.
+  await invalidatePrincipal(userId);
 }
 
 /**

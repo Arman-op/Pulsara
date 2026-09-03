@@ -51,22 +51,29 @@ describe('administrator-only routes', () => {
      * which somebody's access is being revoked for a reason.
      */
     const admin = await signedInAs(Role.ADMIN);
-    const second = await createUser({ role: Role.ADMIN });
+    const other = await signIn(await createUser({ role: Role.ADMIN }));
 
     await asUser(admin.accessToken).expect(200);
 
-    await prisma.user.update({ where: { id: admin.user.id }, data: { role: Role.VIEWER } });
+    await request(app)
+      .patch(`/api/users/${admin.user.id}`)
+      .set('Authorization', `Bearer ${other.accessToken}`)
+      .send({ role: Role.VIEWER })
+      .expect(200);
 
-    // Same token, immediately afterwards.
+    // The same token, on the very next request.
     await asUser(admin.accessToken).expect(403);
-    expect(second.role).toBe(Role.ADMIN);
   });
 
   it('rejects a deactivated account outright, not merely as unauthorised', async () => {
     const admin = await signedInAs(Role.ADMIN);
-    await createUser({ role: Role.ADMIN });
+    const other = await signIn(await createUser({ role: Role.ADMIN }));
 
-    await prisma.user.update({ where: { id: admin.user.id }, data: { isActive: false } });
+    await request(app)
+      .patch(`/api/users/${admin.user.id}`)
+      .set('Authorization', `Bearer ${other.accessToken}`)
+      .send({ isActive: false })
+      .expect(200);
 
     await asUser(admin.accessToken).expect(401);
   });

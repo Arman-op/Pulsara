@@ -15,6 +15,20 @@ export const accessTokenClaimsSchema = z.object({
   email: z.string().email(),
   name: z.string(),
   role: z.nativeEnum(Role),
+  /**
+   * Issue time in milliseconds.
+   *
+   * JWT's own `iat` has one-second resolution, which cannot distinguish a token
+   * issued just before a revocation from one issued just after it inside the
+   * same second — and both directions of rounding are wrong. Rounding up
+   * refuses the token somebody has just signed in with; rounding down honours
+   * the token the revocation was meant to kill.
+   *
+   * Optional, so tokens minted by a deployment that predates this claim are
+   * still accepted; they fall back to second resolution rather than logging
+   * everybody out at rollout.
+   */
+  iatMs: z.number().int().positive().optional(),
 });
 
 export type AccessTokenClaims = z.infer<typeof accessTokenClaimsSchema>;

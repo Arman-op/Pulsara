@@ -32,6 +32,12 @@ import { logger } from './logger';
 export const CacheNamespace = {
   Services: 'services',
   Deployments: 'deployments',
+  /**
+   * One entry per account, holding the facts `protect` checks on every request.
+   * Invalidated explicitly rather than left to expire, because a revocation
+   * that only takes effect after a TTL is a revocation that does not work.
+   */
+  Principals: 'principals',
 } as const;
 
 export type CacheNamespaceName = (typeof CacheNamespace)[keyof typeof CacheNamespace];
@@ -86,6 +92,23 @@ export async function cached<T>(key: string, load: () => Promise<T>): Promise<T>
   }
 
   return value;
+}
+
+/**
+ * Drops one exact key.
+ *
+ * Used where the caller knows precisely what changed — a single account being
+ * demoted or signed out — so there is no reason to scan a namespace for it.
+ */
+export async function invalidateKey(key: string): Promise<void> {
+  const redis = isCacheEnabled ? cacheRedis() : null;
+  if (!redis) return;
+
+  try {
+    await redis.unlink(key);
+  } catch (error) {
+    logger.warn({ err: error, key }, 'Cache invalidation failed');
+  }
 }
 
 /**

@@ -235,3 +235,83 @@ describe('GET /api/auth/sessions', () => {
     );
   });
 });
+
+describe('signing out everywhere', () => {
+  it('stops the access token working immediately, not at its expiry', async () => {
+    /**
+     * Revoking refresh tokens ends a session's ability to *renew*, but an
+     * access token already issued stays cryptographically valid until it
+     * expires. Without `sessionsValidFrom` this left a stolen token working for
+     * the rest of its lifetime — the exact window the person clicking "sign out
+     * everywhere" is trying to close.
+     */
+    const session = await signIn(await createUser());
+
+    await request(app)
+      .get('/api/auth/me')
+      .set('Authorization', `Bearer ${session.accessToken}`)
+      .expect(200);
+
+    await request(app)
+      .delete('/api/auth/sessions')
+      .set('Authorization', `Bearer ${session.accessToken}`)
+      .expect(200);
+
+    await request(app)
+      .get('/api/auth/me')
+      .set('Authorization', `Bearer ${session.accessToken}`)
+      .expect(401);
+  });
+
+  it('leaves other accounts alone', async () => {
+    const mine = await signIn(await createUser());
+    const theirs = await signIn(await createUser());
+
+    await request(app)
+      .delete('/api/auth/sessions')
+      .set('Authorization', `Bearer ${mine.accessToken}`)
+      .expect(200);
+
+    await request(app)
+      .get('/api/auth/me')
+      .set('Authorization', `Bearer ${theirs.accessToken}`)
+      .expect(200);
+  });
+
+  it('lets a fresh sign-in work straight afterwards', async () => {
+    // The stamp must bar tokens issued *before* it, not the account itself.
+    const user = await createUser();
+    const first = await signIn(user);
+
+    await request(app)
+      .delete('/api/auth/sessions')
+      .set('Authorization', `Bearer ${first.accessToken}`)
+      .expect(200);
+
+    const second = await signIn(user);
+    await request(app)
+      .get('/api/auth/me')
+      .set('Authorization', `Bearer ${second.accessToken}`)
+      .expect(200);
+  });
+
+  it('is what a password change does too', async () => {
+    /**
+     * If the account was compromised, the attacker's session is exactly what
+     * the password change is meant to terminate.
+     */
+    const user = await createUser();
+    const session = await signIn(user);
+
+    await request(app)
+      .post('/api/auth/password')
+      .set('Authorization', `Bearer ${session.accessToken}`)
+      .send({ currentPassword: TEST_PASSWORD, newPassword: 'a-much-longer-new-password-1' })
+      .expect(200);
+
+    await request(app)
+      .get('/api/auth/me')
+      .set('Authorization', `Bearer ${session.accessToken}`)
+      .expect(401);
+  });
+});

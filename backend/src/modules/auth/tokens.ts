@@ -22,7 +22,7 @@ const AUDIENCE = 'pulsara-api';
 export type AccessTokenPayload = Omit<AccessTokenClaims, 'sub'>;
 
 export function signAccessToken(subject: string, payload: AccessTokenPayload): string {
-  return jwt.sign(payload, env.JWT_ACCESS_SECRET, {
+  return jwt.sign({ ...payload, iatMs: Date.now() }, env.JWT_ACCESS_SECRET, {
     subject,
     issuer: ISSUER,
     audience: AUDIENCE,

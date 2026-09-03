@@ -14,6 +14,7 @@ import {
 } from '../../lib/validation';
 import { requireUser } from '../../middleware/auth';
 import { revokeAllSessionsForUser } from '../auth/auth.service';
+import { invalidatePrincipal } from '../auth/principal';
 
 /**
  * User administration.
@@ -149,6 +150,13 @@ export async function updateUser(req: Request, res: Response): Promise<void> {
   if (input.isActive === false) {
     await revokeAllSessionsForUser(id);
   }
+
+  /**
+   * A role change has to reach `protect` at once as well. Without this the
+   * demoted administrator keeps administrative power for as long as the cached
+   * principal lives, which is the same bug in a smaller window.
+   */
+  await invalidatePrincipal(id);
 
   if (input.role !== undefined && input.role !== updated.existing.role) {
     recordAudit(req, actor.id, {
