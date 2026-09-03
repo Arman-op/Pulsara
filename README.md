@@ -292,6 +292,25 @@ Set `METRICS_SCRAPE_TOKEN` if the port is reachable from outside the cluster;
 the scraper then needs `authorization: Bearer <token>`. The response names every
 monitored service, reports host saturation and counts open incidents.
 
+### Where incidents come from
+
+| Source | Opens when | Resolves when |
+| :--- | :--- | :--- |
+| Service probing | A monitored service fails its checks | It answers again |
+| Host resources | CPU, memory or disk stays over its threshold | Usage stays under it |
+| GitHub Actions | The default branch's workflow is failing | It passes again |
+| A person | Somebody opens one in the UI | Somebody resolves it |
+
+The first three are `AUTOMATED` and deduplicated per condition, so a flapping
+service produces one incident rather than one per probe. The fourth is `MANUAL`,
+carries no dedupe key — two people tracking two problems on one service is
+legitimate — and is never closed automatically: a person may be tracking
+something no probe can see.
+
+Every state change, whoever makes it, appends to the incident timeline. Changes
+a *person* makes also write an `AuditLog` row naming them and recording the
+before and after, readable by an administrator at `/api/users/audit/log`.
+
 ### Alerts on host resources
 
 Sampled CPU, memory and disk usage are compared against configured thresholds on
@@ -442,8 +461,8 @@ structured logging, health probes, graceful shutdown, real host telemetry
 collection with batched persistence, a Prometheus scrape endpoint, service
 probing with a hysteresis state machine, derived uptime and latency percentiles,
 retention, an authenticated realtime stream, alerting engines that open and
-resolve incidents from observed outages and from host resource pressure, a
-GitHub Actions
+resolve incidents from observed outages, host resource pressure and failing
+deliveries, a GitHub Actions
 integration with signed webhooks and reconciling backfill, and a web client that
 reads all of it through a single API layer with no token in `localStorage` and
 no placeholder rows.

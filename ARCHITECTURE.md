@@ -436,7 +436,7 @@ browser history.
 
 ## 8. Alerting: from an observation to an incident
 
-There are two sources of automated incidents.
+There are three sources of automated incidents, and one human one.
 
 **Service reachability.** The probe scheduler emits a status transition and the
 engine decides whether it is worth waking somebody for. Every incident it opens
@@ -447,14 +447,62 @@ against configured thresholds on every sample. This is the question that gets
 asked first when a service is technically up and behaving badly, and answering
 it needs no probe at all.
 
-Both go through the same write path, in `incident-store.ts`, because they agree
-on everything that matters: an incident is identified by the condition rather
-than the occurrence, severity escalates but never falls while it is open, a
-duplicate open is a race to absorb rather than an error, and only what a machine
-opened may a machine close. Those are four decisions somebody would otherwise
-re-make, differently, in the second implementation — the de-escalation rule in
-particular looks like an obvious improvement right up until you notice it drops
-an outage below the threshold a human is watching, mid-outage.
+**Delivery failure.** A workflow failing on the branch that ships is an
+operational problem — nothing can be released until it is fixed — so it belongs
+in the same feed as an outage rather than in a separate place people forget to
+look.
+
+**A person.** Operators genuinely raise incidents the monitoring cannot see: a
+customer report, a bad configuration change, a dependency somebody else runs.
+That path is ordinary validated CRUD, and what it produces is labelled MANUAL so
+it reads differently from a machine's finding.
+
+All three automated sources go through the same write path, in
+`incident-store.ts`, because they agree on everything that matters: an incident
+is identified by the condition rather than the occurrence, severity escalates
+but never falls while it is open, a duplicate open is a race to absorb rather
+than an error, and only what a machine opened may a machine close. Those are
+four decisions somebody would otherwise re-make, differently, in the second
+implementation — the de-escalation rule in particular looks like an obvious
+improvement right up until you notice it drops an outage below the threshold a
+human is watching, mid-outage.
+
+### Delivery alerting reads state, it does not react to events
+
+The condition is *"the latest run of this workflow on this branch is failing"*,
+decided from stored history — not *"a failed run just arrived"*.
+
+Reacting per delivery would be wrong three ways at once. Backfilling a
+repository would open incidents for builds that failed and were fixed last week.
+Webhook deliveries carry no ordering guarantee, so a late failure could reopen
+what a later success had already cleared. And a re-run of the same broken build
+would look like a second, separate problem. Deciding from the newest finished
+run makes all three fall out correctly, and makes the engine idempotent:
+evaluating twice changes nothing.
+
+Two further judgements:
+
+- **Only the default branch alerts.** A failing build on a feature branch is a
+  developer mid-work. Opening an incident for every red pull-request run would
+  bury the outages this feed exists to surface, and the predictable response —
+  muting it — costs the real alerts too. Where the default branch is unknown the
+  engine stays quiet rather than guessing `main`, which would be wrong for every
+  repository still on `master`.
+- **A cancelled run is not evidence either way.** It is usually somebody
+  superseding their own push, so an open incident stays open and a healthy
+  branch stays quiet.
+
+Severity is HIGH on the first failure and CRITICAL once the branch has been red
+for `DEPLOYMENT_FAILURE_ESCALATION_RUNS` runs in a row, counted from stored
+history rather than from an in-memory counter — webhooks and the reconciling
+poll both write here, the process restarts, and runs can arrive out of order.
+
+The stored title and description are kept current as the failure count moves,
+without appending to the timeline. That is a fix, not a design: the row was
+originally restated only when severity rose, so an incident could go on saying
+"failed for 1 run" and linking the *first* failure while the build had been red
+six times. It was found by delivering real signed webhooks, not by reading the
+code.
 
 For comparison, the previous system's incidents were two rows written by the
 seed script — "High latency on Background Workers" and "Database connection
@@ -543,9 +591,34 @@ A metric that was not measured is skipped, never read as zero. Rendering a
 missing disk figure as 0% would satisfy every recovery check and silently close
 a real incident.
 
+### The timeline and the audit trail are not the same record
+
+Every incident mutation writes both, and they answer different questions for
+different audiences.
+
+The **timeline** (`IncidentEvent`) is the narrative of one incident: what
+happened, in order, including everything the machines did. It is visible to
+anybody who can see the incident, and it is what makes a postmortem possible.
+
+The **audit trail** (`AuditLog`) is administrator-only, queryable by actor
+across the whole system, and records only what a *person* chose to do — with the
+before and after values, because "somebody edited this incident" is not
+accountability and "this person moved it from CRITICAL to LOW at 03:14" is.
+
+`AuditLog.userId` is not nullable, deliberately: the trail answers "who did
+this", and an automated resolution has no who. Machine transitions therefore
+appear on the timeline and not in the audit trail, which is why both exist.
+
+Incident audit rows are written *inside the transaction that makes the change*,
+using `recordAuditIn` rather than the fire-and-forget `recordAudit` used
+elsewhere. The controller already needs that transaction so the timeline entry
+and the state change commit together; once it exists the audit row rides along
+for free, with the stronger guarantee that an audited action either happened and
+was recorded or did neither.
+
 ### Alerting failures never stop monitoring
 
-Both engines catch and log rather than propagating. A bug in alerting must not
+All three engines catch and log rather than propagating. A bug in alerting must not
 take down the loop that feeds it, because the observations remain correct and
 useful even when the alerting on top of them is not.
 
