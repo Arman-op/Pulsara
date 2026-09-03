@@ -89,6 +89,12 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # Fails on a high or critical advisory in production dependencies that
+      # nobody has justified. scripts/audit-allowlist.json is where a finding
+      # gets excused, and each entry has to say why and carry a review date.
+      - name: Audit dependencies
+        run: npm run audit
+
       - name: Typecheck
         run: npm run typecheck
 
@@ -131,6 +137,9 @@ jobs:
 
       - name: Lint
         run: npm run lint
+
+      - name: Audit dependencies
+        run: npm run audit
 
       - name: Typecheck
         run: npm run typecheck
