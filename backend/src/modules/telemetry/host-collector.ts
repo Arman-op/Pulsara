@@ -281,6 +281,16 @@ export function startHostCollector(
   let persistTimer: NodeJS.Timeout | null = null;
   let stopped = false;
 
+  /**
+   * The read currently in progress, so `stop` can wait for it.
+   *
+   * Without this, stopping resolves while a sample is still mid-read, and that
+   * sample then records and publishes afterwards — so "stopped" would not mean
+   * "no longer writing", and the final flush would miss whatever the last read
+   * was about to contribute.
+   */
+  let inFlight: Promise<void> | null = null;
+
   const windows = new Map<MetricTypeName, Window>();
 
   async function sample(): Promise<void> {
@@ -353,7 +363,8 @@ export function startHostCollector(
    */
   function scheduleNextSample(): void {
     sampleTimer = setTimeout(() => {
-      void sample().finally(() => {
+      inFlight = sample().finally(() => {
+        inFlight = null;
         if (!stopped) scheduleNextSample();
       });
     }, sampleIntervalMs);
@@ -375,7 +386,9 @@ export function startHostCollector(
 
     if (stopped) return;
 
-    await sample();
+    inFlight = sample();
+    await inFlight;
+    inFlight = null;
 
     if (stopped) return;
 
@@ -398,6 +411,11 @@ export function startHostCollector(
       if (persistTimer) clearInterval(persistTimer);
       sampleTimer = null;
       persistTimer = null;
+
+      // Let the read in progress finish, so its values are in the window the
+      // flush below is about to write rather than being lost with it.
+      await inFlight;
+
       // One last write, so a rollout does not silently discard the window in
       // progress on every replica it replaces.
       await persist();
