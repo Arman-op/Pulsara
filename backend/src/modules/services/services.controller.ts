@@ -3,6 +3,7 @@ import type { Request, Response } from 'express';
 import { env } from '../../config/env';
 import { prisma } from '../../db/prisma';
 import { recordAudit } from '../../lib/audit';
+import { CacheNamespace, cacheKey, cached, invalidate } from '../../lib/cache';
 import { NotFoundError } from '../../lib/errors';
 import { sendSuccess } from '../../lib/http';
 import { parseBody, parseParams, uuidParamSchema } from '../../lib/validation';
@@ -23,29 +24,40 @@ import { createServiceSchema, updateServiceSchema } from './services.schemas';
  * that as "not measured" rather than inventing a figure.
  */
 export async function listServices(_req: Request, res: Response): Promise<void> {
-  const [services, health] = await Promise.all([
-    prisma.service.findMany({
-      orderBy: { name: 'asc' },
-      select: {
-        id: true,
-        name: true,
-        description: true,
-        status: true,
-        probeType: true,
-        probeTarget: true,
-        probeIntervalSeconds: true,
-        isMonitored: true,
-        lastCheckedAt: true,
-        updatedAt: true,
-      },
-    }),
-    getServiceHealth(),
-  ]);
+  /**
+   * Cached because the health figures are not a column read: they come from a
+   * window function over every stored probe result, and every open dashboard
+   * asks for them every thirty seconds. The same answer is served to every
+   * authenticated caller, which is what makes one shared key safe here.
+   *
+   * A status change invalidates this immediately, so the TTL only ever bounds
+   * staleness in the windowed aggregates — never in whether a service is up.
+   */
+  const enriched = await cached(cacheKey(CacheNamespace.Services, 'list'), async () => {
+    const [services, health] = await Promise.all([
+      prisma.service.findMany({
+        orderBy: { name: 'asc' },
+        select: {
+          id: true,
+          name: true,
+          description: true,
+          status: true,
+          probeType: true,
+          probeTarget: true,
+          probeIntervalSeconds: true,
+          isMonitored: true,
+          lastCheckedAt: true,
+          updatedAt: true,
+        },
+      }),
+      getServiceHealth(),
+    ]);
 
-  const enriched = services.map((service) => ({
-    ...service,
-    ...(health.get(service.id) ?? NO_OBSERVATIONS),
-  }));
+    return services.map((service) => ({
+      ...service,
+      ...(health.get(service.id) ?? NO_OBSERVATIONS),
+    }));
+  });
 
   sendSuccess(res, enriched, {
     /** States the window the uptime and latency figures describe. */
@@ -105,6 +117,10 @@ export async function createService(req: Request, res: Response): Promise<void> 
     },
   });
 
+  // The catalogue has changed shape, so the cached list is wrong now rather
+  // than in ten seconds.
+  await invalidate(CacheNamespace.Services);
+
   recordAudit(req, actor.id, {
     action: AuditAction.SERVICE_CREATED,
     resource: 'service',
@@ -142,6 +158,8 @@ export async function updateService(req: Request, res: Response): Promise<void> 
     },
   });
 
+  await invalidate(CacheNamespace.Services);
+
   recordAudit(req, actor.id, {
     action: AuditAction.SERVICE_UPDATED,
     resource: 'service',
@@ -162,6 +180,8 @@ export async function deleteService(req: Request, res: Response): Promise<void> 
   // Probe history cascades with the service; incidents keep their record and
   // have their service reference set to null.
   await prisma.service.delete({ where: { id } });
+
+  await invalidate(CacheNamespace.Services);
 
   recordAudit(req, actor.id, {
     action: AuditAction.SERVICE_DELETED,

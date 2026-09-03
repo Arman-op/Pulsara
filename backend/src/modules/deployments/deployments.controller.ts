@@ -3,6 +3,7 @@ import type { Request, Response } from 'express';
 import { z } from 'zod';
 import { isGitHubPollingConfigured, isGitHubWebhookConfigured } from '../../config/env';
 import { prisma } from '../../db/prisma';
+import { CacheNamespace, cacheKey, cached } from '../../lib/cache';
 import { NotFoundError } from '../../lib/errors';
 import { pageMeta, sendSuccess } from '../../lib/http';
 import { paginationSchema, parseParams, parseQuery, uuidParamSchema } from '../../lib/validation';
@@ -31,17 +32,32 @@ export async function listDeployments(req: Request, res: Response): Promise<void
     ...(branch ? { branch } : {}),
   };
 
-  const [deployments, total, connectionCount] = await prisma.$transaction([
-    prisma.deployment.findMany({
-      where,
-      take: limit,
-      skip: offset,
-      orderBy: { createdAt: 'desc' },
-      include: { stages: { orderBy: [{ startedAt: 'asc' }, { createdAt: 'asc' }] } },
-    }),
-    prisma.deployment.count({ where }),
-    prisma.repoConnection.count({ where: { isActive: true } }),
-  ]);
+  /**
+   * The filters and the page are part of the key: two callers asking different
+   * questions must never share an answer. Every run that lands — by webhook or
+   * by sync — invalidates the namespace, so a finished deployment appears at
+   * once rather than after the TTL.
+   */
+  const discriminator = JSON.stringify({ limit, offset, status, repo, branch });
+
+  const { deployments, total, connectionCount } = await cached(
+    cacheKey(CacheNamespace.Deployments, discriminator),
+    async () => {
+      const [rows, count, connections] = await prisma.$transaction([
+        prisma.deployment.findMany({
+          where,
+          take: limit,
+          skip: offset,
+          orderBy: { createdAt: 'desc' },
+          include: { stages: { orderBy: [{ startedAt: 'asc' }, { createdAt: 'asc' }] } },
+        }),
+        prisma.deployment.count({ where }),
+        prisma.repoConnection.count({ where: { isActive: true } }),
+      ]);
+
+      return { deployments: rows, total: count, connectionCount: connections };
+    },
+  );
 
   sendSuccess(res, deployments, {
     ...pageMeta(total, limit, offset),

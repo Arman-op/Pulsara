@@ -2,6 +2,7 @@ import type { RepoConnection } from '@prisma/client';
 import { CiProvider } from '@prisma/client';
 import { env } from '../../config/env';
 import { prisma } from '../../db/prisma';
+import { CacheNamespace, invalidate } from '../../lib/cache';
 import { logger } from '../../lib/logger';
 import { evaluateDeploymentHealth } from '../incidents/deployment-alert-engine';
 import {
@@ -80,6 +81,9 @@ export async function upsertDeploymentFromRun(
     select: { id: true },
   });
 
+  // A run that has landed should appear at once, not after the cache expires.
+  await invalidate(CacheNamespace.Deployments);
+
   return {
     id: deployment.id,
     repo: mapped.repo,
@@ -122,6 +126,14 @@ export async function upsertStageFromJob(job: GitHubWorkflowJob): Promise<void> 
       completedAt: mapped.completedAt,
     },
   });
+
+  /**
+   * After the write, never before. Invalidating first leaves a window in which
+   * a concurrent read repopulates the cache from the pre-write state, and the
+   * stale value then survives for a full TTL — the one ordering mistake that
+   * turns a cache into a source of wrong answers.
+   */
+  await invalidate(CacheNamespace.Deployments);
 }
 
 /**
