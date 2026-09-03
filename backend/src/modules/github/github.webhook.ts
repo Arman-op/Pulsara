@@ -35,7 +35,7 @@ const SIGNATURE_PREFIX = 'sha256=';
  *    guessed signature was correct and makes the digest forgeable one byte at a
  *    time.
  */
-function verifySignature(rawBody: Buffer, signatureHeader: string | undefined): void {
+export function verifySignature(rawBody: Buffer, signatureHeader: string | undefined): void {
   if (!env.GITHUB_WEBHOOK_SECRET) {
     throw new UpstreamUnavailableError('GitHub webhooks are not configured on this deployment');
   }

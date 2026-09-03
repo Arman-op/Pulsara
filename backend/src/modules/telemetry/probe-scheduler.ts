@@ -39,7 +39,7 @@ export type ServiceStatusChange = {
  * MAINTENANCE is never entered or left automatically: it is an operator's
  * declaration that alerts are expected, and the scheduler must not override it.
  */
-function nextStatus(
+export function nextStatus(
   current: ServiceState,
   outcome: ProbeOutcome,
   consecutiveFailures: number,

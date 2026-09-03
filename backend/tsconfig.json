@@ -26,5 +26,5 @@
   },
   /* Everything TypeScript in the package is type-checked, including the seed
      script and tooling config that the production build deliberately omits. */
-  "include": ["src/**/*", "prisma/**/*", "prisma.config.ts"]
+  "include": ["src/**/*", "prisma/**/*", "tests/**/*", "prisma.config.ts", "vitest.config.ts"]
 }

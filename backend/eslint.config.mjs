@@ -51,6 +51,22 @@ export default tseslint.config(
     rules: { 'no-console': 'off' },
   },
   {
+    /**
+     * Tests read `response.body`, which supertest types as `any` because the
+     * shape is whatever the server sent. Asserting on it is the entire point of
+     * the file, and an unexpected shape fails the assertion loudly — which is
+     * the protection these rules exist to provide in `src`, where a wrong shape
+     * would instead be silently carried into production code.
+     */
+    files: ['tests/**/*.ts'],
+    rules: {
+      '@typescript-eslint/no-unsafe-member-access': 'off',
+      '@typescript-eslint/no-unsafe-assignment': 'off',
+      '@typescript-eslint/no-unsafe-argument': 'off',
+      '@typescript-eslint/no-unsafe-call': 'off',
+    },
+  },
+  {
     // This file configures the linter and is not part of the TypeScript
     // project, so the type-aware rules have no program to consult.
     files: ['eslint.config.mjs'],
