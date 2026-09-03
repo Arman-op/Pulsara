@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import type { NextFunction, Request, Response } from 'express';
 import pinoHttp from 'pino-http';
 import { logger } from '../lib/logger';
+import { runWithRequestContext } from '../lib/request-context';
 
 /**
  * Per-request logging and correlation.
@@ -13,7 +15,7 @@ import { logger } from '../lib/logger';
 
 const HEALTH_PATH = '/api/health';
 
-export const requestLogger = pinoHttp({
+const httpLogger = pinoHttp({
   logger,
   genReqId: (req, res) => {
     const existing = req.headers['x-request-id'];
@@ -31,3 +33,20 @@ export const requestLogger = pinoHttp({
   customErrorMessage: (req, res, err) =>
     `${req.method} ${req.url} ${res.statusCode} ${err.message}`,
 });
+
+/**
+ * Assigns the id, then runs the rest of the request inside a context carrying
+ * it, so every log line the request produces is stamped with it — not only the
+ * two pino-http writes itself.
+ */
+export function requestLogger(req: Request, res: Response, next: NextFunction): void {
+  httpLogger(req, res);
+
+  /**
+   * `genReqId` above always returns a string, but pino-http types `req.id` as
+   * the wider `ReqId`, so it is narrowed rather than coerced — stringifying an
+   * object would silently produce "[object Object]" as a correlation id.
+   */
+  const { id } = req;
+  runWithRequestContext({ requestId: typeof id === 'string' ? id : String(Number(id)) }, next);
+}

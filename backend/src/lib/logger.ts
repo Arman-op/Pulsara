@@ -1,5 +1,6 @@
 import pino from 'pino';
 import { env, isProduction, isTest } from '../config/env';
+import { currentRequestId } from './request-context';
 
 /**
  * Structured application logger.
@@ -29,6 +30,20 @@ export const logger = pino({
   level: isTest ? 'silent' : env.LOG_LEVEL,
   redact: { paths: REDACTED_PATHS, censor: '[redacted]' },
   base: { service: 'pulsara-api' },
+  /**
+   * Stamps the current request's id onto every line, including the ones written
+   * deep inside a service or an alerting engine that never sees a request
+   * object.
+   *
+   * Without this, correlation covered only the two lines pino-http emits, and
+   * the lines actually worth finding during an incident — the ones in between —
+   * could not be tied to the request that produced them. Work with no request
+   * behind it, such as a scheduled probe, correctly carries no id.
+   */
+  mixin: () => {
+    const requestId = currentRequestId();
+    return requestId ? { requestId } : {};
+  },
   formatters: {
     level: (label) => ({ level: label }),
   },
