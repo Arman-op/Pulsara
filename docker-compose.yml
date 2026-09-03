@@ -1,15 +1,27 @@
-# Local development infrastructure.
+# Local development and a runnable full stack.
 #
-# This file provides the backing services the application needs on a developer
-# machine. The application containers themselves are not defined here yet:
-# the previous version declared `frontend` and `backend` services that built
-# from `./frontend/Dockerfile` and `./backend/Dockerfile`, neither of which
-# existed, so `docker compose up` failed on a clean checkout. They return with
-# the real container images.
+# By default this file brings up only the backing services, because that is what
+# a developer running `npm run dev` in two terminals actually needs:
 #
-# It also hard-coded `JWT_SECRET=production_secret_change_me` in a committed
-# file. Nothing in this file is a credential for anything but a throwaway local
-# database, and the API refuses to start with a placeholder signing key.
+#     docker compose up -d
+#
+# The application containers live behind the `app` profile, so that the default
+# path stays fast and, more importantly, does not fail on a clean checkout. They
+# read `backend/.env`, which is deliberately not in the repository:
+#
+#     cp backend/.env.example backend/.env   # then fill in the secrets
+#     docker compose --profile app up --build
+#
+# The previous version of this file declared `frontend` and `backend` services
+# that built from Dockerfiles which did not exist, so `docker compose up` failed
+# on a clean checkout — and hard-coded `JWT_SECRET=production_secret_change_me`,
+# a value the API now refuses to start with.
+#
+# There is no Redis service. Nothing in the system uses one: rate limiting is
+# in-process, the realtime transport is a single Socket.IO server, and every
+# derived figure is computed in PostgreSQL on read. Adding a cache before there
+# is anything to cache would be infrastructure to maintain and nothing to show
+# for it.
 
 services:
   postgres:
@@ -30,6 +42,54 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
+    networks:
+      - pulsara
+
+  api:
+    profiles: ['app']
+    build:
+      context: ./backend
+    container_name: pulsara-api
+    env_file:
+      - ./backend/.env
+    environment:
+      NODE_ENV: production
+      PORT: '4000'
+      # Overrides whatever `.env` says: inside the network the database is
+      # reachable by service name on its own port, not on the published 5433.
+      DATABASE_URL: postgresql://pulsara:pulsara_local_dev@postgres:5432/pulsara?schema=public
+      # The browser reaches the client on the published port below, so that is
+      # the origin the API must allow.
+      CORS_ORIGINS: http://localhost:5174
+    ports:
+      - '4000:4000'
+    depends_on:
+      postgres:
+        # Waits for the healthcheck, not merely for the container to exist —
+        # otherwise the API starts, fails to connect, and exits.
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - pulsara
+
+  web:
+    profiles: ['app']
+    build:
+      context: ./frontend
+      args:
+        # Vite inlines this at build time, so it is a build argument. The value
+        # is the origin the *browser* uses, which is the published port above,
+        # not the in-network service name.
+        VITE_API_URL: http://localhost:4000
+    container_name: pulsara-web
+    ports:
+      # The image serves on 8080 as an unprivileged user; 5174 keeps the origin
+      # identical to the Vite dev server, so CORS_ORIGINS does not change
+      # between the two ways of running the client.
+      - '5174:8080'
+    depends_on:
+      - api
     restart: unless-stopped
     networks:
       - pulsara
