@@ -94,9 +94,10 @@ backend/
       health/              Liveness and readiness
       services/            Catalogue and probe configuration
       telemetry/           Host collector, probe scheduler, retention, reads
+      metrics/             Prometheus exposition on GET /metrics
       deployments/         Delivery history reads
       github/              GitHub client, webhook receiver, sync
-      incidents/           Alerting engine, incident CRUD and timeline
+      incidents/           Alerting engines, incident CRUD and timeline
     realtime/io.ts       Authenticated WebSocket transport and publisher
     app.ts               Middleware pipeline and route mounting
     server.ts            Listener, graceful shutdown, crash handling
@@ -374,6 +375,45 @@ honestly.
 The chart does not bridge gaps (`connectNulls={false}`): a gap means a period
 that was not measured, and drawing a line through it would invent data.
 
+### Sampling and persistence are on different clocks
+
+Every sample is broadcast to connected clients, exposed on the scrape endpoint
+and evaluated against the alert thresholds. Only the mean of each window reaches
+the database.
+
+The reason is arithmetic. At a two-second cadence, six metric families produce
+roughly a quarter of a million rows a day per host — to draw a chart that
+re-buckets them on read anyway. Writing the mean of a thirty-second window keeps
+the same chart at a fifteenth of the write volume, and equal-length windows make
+a mean of means equal to the mean, so the chart is not merely similar but
+identical in expectation.
+
+The obvious objection is that a mean hides a spike. It would, if alerting read
+this table — which is exactly why alerting does not. Thresholds are evaluated
+against raw samples as they are taken, so a four-second spike still opens an
+incident even though no row will ever record it individually.
+
+### The sample loop paces itself
+
+Reads are scheduled `METRICS_SAMPLE_INTERVAL_MS` after the previous one
+*returns*, not on a fixed-rate interval.
+
+The cost of reading a counter is not a constant. On Linux these are procfs reads
+and return in microseconds. On Windows `systeminformation` shells out:
+`networkStats()` was measured at around four seconds on the development machine
+and `fsSize()` at up to eight. A fixed two-second interval on that platform
+queues a new read before the last has returned, forever, and the usual patch for
+that — skip a tick while one is in flight — converts a real cadence into a
+stream of warnings nobody can act on.
+
+Self-pacing degrades honestly: the configured interval becomes the gap between
+samples, a slow platform simply samples less often, and
+`pulsara_host_sample_age_seconds` says by how much.
+
+Disk is the exception even so. It is read at most once a minute and the value
+reused, because a volume does not fill and drain between heartbeats, and paying
+an eight-second syscall every two seconds to learn that would be absurd.
+
 ### Retention
 
 Telemetry is append-only and grows without bound — roughly a million indexed
@@ -396,9 +436,25 @@ browser history.
 
 ## 8. Alerting: from an observation to an incident
 
-The probe scheduler emits a status transition; the alerting engine decides
-whether that transition is worth waking somebody for. Every incident it opens is
-backed by probe results a user can go and look at.
+There are two sources of automated incidents.
+
+**Service reachability.** The probe scheduler emits a status transition and the
+engine decides whether it is worth waking somebody for. Every incident it opens
+is backed by probe results a user can go and look at.
+
+**Host resource pressure.** Sampled CPU, memory and disk usage are compared
+against configured thresholds on every sample. This is the question that gets
+asked first when a service is technically up and behaving badly, and answering
+it needs no probe at all.
+
+Both go through the same write path, in `incident-store.ts`, because they agree
+on everything that matters: an incident is identified by the condition rather
+than the occurrence, severity escalates but never falls while it is open, a
+duplicate open is a race to absorb rather than an error, and only what a machine
+opened may a machine close. Those are four decisions somebody would otherwise
+re-make, differently, in the second implementation — the de-escalation rule in
+particular looks like an obvious improvement right up until you notice it drops
+an outage below the threshold a human is watching, mid-outage.
 
 For comparison, the previous system's incidents were two rows written by the
 seed script — "High latency on Background Workers" and "Database connection
@@ -463,12 +519,35 @@ Every mutation writes its timeline entry in the same transaction as the change
 itself, so the two cannot diverge — a timeline that is sometimes wrong is worth
 less than no timeline at all.
 
+### Thresholds are configuration, and hysteresis applies to them too
+
+`CPU_ALERT_THRESHOLD_PERCENT` and its siblings are environment variables because
+"90% CPU" means something entirely different on a batch worker than on a request
+path. Disk defaults lower than the other two: a full volume is unrecoverable in
+a way that a busy processor is not.
+
+A breach must persist for `HOST_ALERT_SUSTAINED_SAMPLES` consecutive samples
+before it opens anything, and clear for `HOST_ALERT_RECOVERY_SAMPLES` before it
+resolves — the same shape as service probing, for the same reason. A single
+sample above the line is a garbage-collection pause, a backup starting, or a
+build running. Alerting on it is how an alerting system gets muted, and a muted
+alerting system is worse than none because it is still believed.
+
+Severity has two bands rather than a gradient: at the threshold an incident
+opens HIGH, and at `HOST_ALERT_CRITICAL_PERCENT` it escalates to CRITICAL. An
+engineer acts on "look at this soon" and "look at this now"; a five-level scale
+computed from a percentage would imply a precision the measurement does not
+have.
+
+A metric that was not measured is skipped, never read as zero. Rendering a
+missing disk figure as 0% would satisfy every recovery check and silently close
+a real incident.
+
 ### Alerting failures never stop monitoring
 
-`handleServiceStatusChange` catches and logs rather than propagating. A bug in
-alerting must not take down the probe loop that feeds it, because the
-observations remain correct and useful even when the alerting on top of them
-is not.
+Both engines catch and log rather than propagating. A bug in alerting must not
+take down the loop that feeds it, because the observations remain correct and
+useful even when the alerting on top of them is not.
 
 ---
 
@@ -631,6 +710,51 @@ a working system with nothing to report rather than as a broken one.
 ---
 
 ## 12. Observability and lifecycle
+
+### The system is scrapeable, not just viewable
+
+`GET /metrics` serves Prometheus text exposition. A system that can only be
+observed through its own UI cannot be alerted on by the tooling an organisation
+already runs, cannot be graphed beside anything else, and stops being observable
+at exactly the moment its own front end is the thing that has broken.
+
+It sits at the root rather than under `/api`, because that is the path every
+Prometheus installation already tries, and outside the JSON envelope, because a
+scraper handed `{"success":true,"data":"..."}` simply fails to parse it. It is
+also outside the session middleware: a scraper is not a user, holds no cookie,
+cannot refresh a token, and would report the service down every time the signing
+key rotated.
+
+What it exposes, and why each is there:
+
+| Family | Why |
+| :--- | :--- |
+| `pulsara_host_*_ratio`, `*_bytes_per_second` | The live sample, not the persisted mean |
+| `pulsara_host_sample_age_seconds` | A stopped collector otherwise looks like a perfectly steady machine |
+| `pulsara_host_alert_threshold_ratio` | So a dashboard draws the line the engine is actually using |
+| `pulsara_service_up`, `_uptime_ratio`, `_latency_seconds` | Availability, with `state` as a label so maintenance is not an outage |
+| `pulsara_incidents_open` | Emitted at zero for every severity, because an alert on an absent series never fires |
+| `pulsara_deployments` | Delivery outcomes alongside runtime health |
+| `process_*`, `nodejs_*` | Standard names, taken from `prom-client` rather than reinvented |
+
+Conventions are followed rather than improvised, because getting them wrong is
+what makes an exporter unpleasant to consume: base units throughout (seconds and
+bytes, ratios in 0..1 rather than percentages — the internal model keeps
+percentages because that is what a chart axis wants, and the conversion happens
+in one place), the suffix states the unit, and label cardinality is bounded.
+Nothing is labelled by incident id or request path; that is how an exporter takes
+a Prometheus server down.
+
+An unmeasured value is an **absent series**, never a zero. This is the same rule
+the UI follows with its em dashes, and it matters more here: a zero would draw a
+healthy flat line for a metric nobody collected.
+
+`METRICS_SCRAPE_TOKEN` is optional. Unset is a legitimate configuration when the
+port is reachable only from inside a cluster. Where it is exposed the token
+matters, because the response names every monitored service, reports host
+saturation and counts open incidents — enough to describe the shape and the
+current weak points of a deployment to anyone who asks.
+
 
 - **Logging**: pino, newline-delimited JSON, with authorization headers,
   cookies and password fields redacted at the logger rather than at each call

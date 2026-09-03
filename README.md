@@ -220,6 +220,66 @@ variable `VITE_API_URL` to the origin the published client should talk to.
 
 ---
 
+## Monitoring
+
+Pulsara exposes itself the way it expects other systems to: `GET /metrics`
+serves Prometheus text exposition, at the root and outside the JSON envelope,
+because that is the path and format every scraper already expects.
+
+```bash
+curl -s localhost:4000/metrics | grep '^pulsara_'
+```
+
+```
+pulsara_host_cpu_usage_ratio{host="Arman"} 0.2448
+pulsara_host_memory_usage_ratio{host="Arman"} 0.9199
+pulsara_host_disk_usage_ratio{host="Arman"} 0.7792
+pulsara_host_sample_age_seconds{host="Arman"} 3.639
+pulsara_service_up{service="Pulsara API",state="ONLINE"} 1
+pulsara_service_uptime_ratio{service="Pulsara Web"} 0.10826
+pulsara_service_latency_seconds{service="Pulsara API",quantile="0.95"} 0.013
+pulsara_incidents_open{severity="CRITICAL",source="AUTOMATED"} 1
+pulsara_deployments{status="FAILED"} 1
+```
+
+Values are in base units — seconds, bytes, and ratios in 0..1 rather than
+percentages — and the standard `process_*` and `nodejs_*` families are exported
+under their conventional names, so off-the-shelf Node dashboards work unchanged.
+A metric that has not been measured is an **absent series**, never a zero.
+
+Scrape it with:
+
+```yaml
+scrape_configs:
+  - job_name: pulsara
+    static_configs:
+      - targets: ['pulsara-api:4000']
+```
+
+Set `METRICS_SCRAPE_TOKEN` if the port is reachable from outside the cluster;
+the scraper then needs `authorization: Bearer <token>`. The response names every
+monitored service, reports host saturation and counts open incidents.
+
+### Alerts on host resources
+
+Sampled CPU, memory and disk usage are compared against configured thresholds on
+every sample, and a breach sustained for `HOST_ALERT_SUSTAINED_SAMPLES`
+consecutive samples opens a real `Incident` — the same records a person can open
+by hand, visible on the same page, with the same timeline:
+
+```
+Memory pressure on Arman
+  HIGH · AUTOMATED · open
+  Memory on Arman is at 91.8%, at or above the 90% threshold
+```
+
+It resolves itself once usage stays below the threshold for
+`HOST_ALERT_RECOVERY_SAMPLES` consecutive samples, and escalates to CRITICAL at
+`HOST_ALERT_CRITICAL_PERCENT`. Incidents a person opened are never closed
+automatically. Thresholds are per resource; see `backend/.env.example`.
+
+---
+
 ## Scripts
 
 ### `backend/`
@@ -290,7 +350,10 @@ and GitHub Actions secrets.
 
 ## API
 
-All routes are under `/api`. Every response uses the same envelope:
+All routes below are under `/api`. The one exception is `GET /metrics` at the
+root, which serves Prometheus text exposition — see **Monitoring** below.
+
+Every response uses the same envelope:
 
 ```jsonc
 { "success": true,  "data": …, "meta": … }
@@ -344,9 +407,11 @@ All routes are under `/api`. Every response uses the same envelope:
 Implemented: configuration and secrets hygiene, PostgreSQL with versioned
 migrations, authentication with rotation and RBAC, the error contract,
 structured logging, health probes, graceful shutdown, real host telemetry
-collection, service probing with a hysteresis state machine, derived uptime and
-latency percentiles, retention, an authenticated realtime stream, an alerting
-engine that opens and resolves incidents from observed outages, a GitHub Actions
+collection with batched persistence, a Prometheus scrape endpoint, service
+probing with a hysteresis state machine, derived uptime and latency percentiles,
+retention, an authenticated realtime stream, alerting engines that open and
+resolve incidents from observed outages and from host resource pressure, a
+GitHub Actions
 integration with signed webhooks and reconciling backfill, and a web client that
 reads all of it through a single API layer with no token in `localStorage` and
 no placeholder rows.
