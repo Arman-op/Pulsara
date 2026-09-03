@@ -3,6 +3,7 @@ import si from 'systeminformation';
 import { env } from '../../config/env';
 import { prisma } from '../../db/prisma';
 import { logger } from '../../lib/logger';
+import { recordHostSnapshot } from './host-state';
 
 /**
  * Host telemetry collector.
@@ -88,12 +89,57 @@ function clampPercent(value: number): number {
  * takes and discards one reading at startup so the first sample a user sees is
  * a real interval measurement rather than a lifetime average.
  */
+/**
+ * How often the filesystem table is actually enumerated.
+ *
+ * Everything else here is a cheap counter read, but `fsSize()` shells out to
+ * the platform — on Windows it invokes PowerShell, and a single call was
+ * measured at between one and eight seconds on the development machine. At a
+ * two-second sample cadence that means every tick collides with the previous
+ * one and the collector spends its life skipping.
+ *
+ * Disk usage is also the one figure here that does not move quickly: a volume
+ * does not fill and drain between heartbeats the way CPU does. Reading it once
+ * a minute and reusing the value keeps the fast metrics fast, and costs nothing
+ * that anybody could act on.
+ */
+const DISK_SAMPLE_INTERVAL_MS = 60_000;
+
+let cachedDisk: { value: number | null; readAt: number } | null = null;
+
+/**
+ * Fullest mounted volume, cached.
+ *
+ * Whichever mount is fullest, not an average across them: one full volume is an
+ * outage even when the others are empty.
+ */
+async function readDiskPercent(): Promise<number | null> {
+  const now = Date.now();
+  if (cachedDisk && now - cachedDisk.readAt < DISK_SAMPLE_INTERVAL_MS) {
+    return cachedDisk.value;
+  }
+
+  const disks = await si.fsSize();
+  const mountedUsages = disks
+    .filter((disk) => Number.isFinite(disk.use) && disk.size > 0)
+    .map((disk) => disk.use);
+
+  const value = mountedUsages.length > 0 ? clampPercent(Math.max(...mountedUsages)) : null;
+  cachedDisk = { value, readAt: now };
+  return value;
+}
+
+/** Test seam; a running process has one collector and one cache. */
+export function resetDiskCache(): void {
+  cachedDisk = null;
+}
+
 async function readHost(): Promise<Sample[]> {
-  const [load, memory, disks, networks] = await Promise.all([
+  const [load, memory, networks, diskPercent] = await Promise.all([
     si.currentLoad(),
     si.mem(),
-    si.fsSize(),
     si.networkStats(),
+    readDiskPercent(),
   ]);
 
   const samples: Sample[] = [
@@ -113,20 +159,8 @@ async function readHost(): Promise<Sample[]> {
     });
   }
 
-  /**
-   * Disk pressure is whichever mount is fullest, not an average across them:
-   * one full volume is an outage even when the others are empty.
-   */
-  const mountedUsages = disks
-    .filter((disk) => Number.isFinite(disk.use) && disk.size > 0)
-    .map((disk) => disk.use);
-
-  if (mountedUsages.length > 0) {
-    samples.push({
-      type: MetricType.DiskPercent,
-      value: clampPercent(Math.max(...mountedUsages)),
-      unit: Unit.Percent,
-    });
+  if (diskPercent !== null) {
+    samples.push({ type: MetricType.DiskPercent, value: diskPercent, unit: Unit.Percent });
   }
 
   // Sum across interfaces; a host may be multi-homed.
@@ -185,82 +219,181 @@ function toSnapshot(samples: Sample[], host: string, timestamp: Date): HostSnaps
   };
 }
 
+/**
+ * Accumulator for one persistence window.
+ *
+ * Sampling and writing are deliberately on different clocks. Every sample is
+ * published live and evaluated for alerts; only the mean of each window reaches
+ * the database. At a two-second cadence, writing every sample produced roughly
+ * a quarter of a million rows a day per host to draw a chart that re-buckets
+ * them on read anyway.
+ *
+ * The mean is the right summary here because the chart already averages within
+ * its own buckets, and because equal-length windows make a mean of means equal
+ * to the mean. Peaks are not lost to alerting, which never reads this table.
+ */
+type Window = { sum: number; count: number; unit: string };
+
+function accumulate(windows: Map<MetricTypeName, Window>, samples: Sample[]): void {
+  for (const sample of samples) {
+    const existing = windows.get(sample.type);
+    if (existing) {
+      existing.sum += sample.value;
+      existing.count += 1;
+    } else {
+      windows.set(sample.type, { sum: sample.value, count: 1, unit: sample.unit });
+    }
+  }
+}
+
 export type HostCollector = {
   /** The most recent snapshot, so a newly connected client gets data at once. */
   latest: () => HostSnapshot | null;
   stop: () => void;
 };
 
-export function startHostCollector(publish: (snapshot: HostSnapshot) => void): HostCollector {
+/**
+ * Intervals are injectable so a test can drive the two clocks fast enough to
+ * observe that they are genuinely independent. Production passes neither and
+ * gets the configured values.
+ */
+export type HostCollectorOptions = {
+  sampleIntervalMs?: number;
+  persistIntervalMs?: number;
+};
+
+export function startHostCollector(
+  publish: (snapshot: HostSnapshot) => void,
+  options: HostCollectorOptions = {},
+): HostCollector {
+  const sampleIntervalMs = options.sampleIntervalMs ?? env.METRICS_SAMPLE_INTERVAL_MS;
+  const persistIntervalMs = options.persistIntervalMs ?? env.METRICS_PERSIST_INTERVAL_MS;
+
   let latest: HostSnapshot | null = null;
-  let timer: NodeJS.Timeout | null = null;
-  let collecting = false;
+  let sampleTimer: NodeJS.Timeout | null = null;
+  let persistTimer: NodeJS.Timeout | null = null;
+  let stopped = false;
 
-  async function tick(): Promise<void> {
-    /**
-     * A tick is skipped if the previous one is still running. Without this
-     * guard a slow disk enumeration would let ticks pile up and each new one
-     * would make the contention worse.
-     */
-    if (collecting) {
-      logger.warn('Host metric collection still in progress; skipping this tick');
-      return;
-    }
+  const windows = new Map<MetricTypeName, Window>();
 
-    collecting = true;
+  async function sample(): Promise<void> {
     try {
       const samples = await readHost();
-      const recordedAt = new Date();
+      const observedAt = new Date();
 
+      accumulate(windows, samples);
+
+      latest = toSnapshot(samples, env.TELEMETRY_HOST_ID, observedAt);
+      recordHostSnapshot(latest);
+      publish(latest);
+    } catch (error) {
+      /**
+       * Telemetry collection must never take the process down. A failed read is
+       * logged and the next tick tries again; clients simply see a gap in the
+       * series, which is the truthful representation of a period we did not
+       * measure.
+       */
+      logger.error({ err: error }, 'Host metric sampling failed');
+    }
+  }
+
+  async function persist(): Promise<void> {
+    if (windows.size === 0) return;
+
+    /**
+     * The buffer is drained before the await, not after. Leaving it in place
+     * while the insert is in flight would let samples taken during the write be
+     * counted again in the next window.
+     */
+    const draining = [...windows.entries()];
+    windows.clear();
+
+    const recordedAt = new Date();
+
+    try {
       await prisma.metric.createMany({
-        data: samples.map((sample) => ({
-          type: sample.type,
-          value: sample.value,
-          unit: sample.unit,
+        data: draining.map(([type, window]) => ({
+          type,
+          value: round(window.sum / window.count),
+          unit: window.unit,
           host: env.TELEMETRY_HOST_ID,
           recordedAt,
         })),
       });
-
-      latest = toSnapshot(samples, env.TELEMETRY_HOST_ID, recordedAt);
-      publish(latest);
     } catch (error) {
-      /**
-       * Telemetry collection must never take the process down. A failed read or
-       * a database blip is logged and the next tick tries again; clients simply
-       * see a gap in the series, which is the truthful representation of a
-       * period we did not measure.
-       */
-      logger.error({ err: error }, 'Host metric collection failed');
-    } finally {
-      collecting = false;
+      // A database blip costs one window, not the collector. Re-queueing the
+      // drained samples would mean the next write silently spans two windows
+      // and is no longer the mean of anything.
+      logger.error({ err: error }, 'Host metric persistence failed; this window is lost');
     }
   }
 
+  /**
+   * The sample loop is self-pacing: the next read is scheduled once the
+   * previous one has finished, rather than on a fixed-rate interval.
+   *
+   * The cost of reading a counter is not a constant. On Linux these are procfs
+   * reads and return in microseconds; on Windows `networkStats()` shells out
+   * and was measured at around four seconds on the development machine. A fixed
+   * interval on that platform queues a new read before the last has returned,
+   * forever — and the usual patch for it, skipping a tick while one is in
+   * flight, turns a real cadence into a stream of warnings that say nothing an
+   * operator can act on.
+   *
+   * Self-pacing degrades honestly instead: the configured interval is the gap
+   * between samples, so a slow platform simply samples less often, and the
+   * `pulsara_host_sample_age_seconds` gauge says by how much.
+   */
+  function scheduleNextSample(): void {
+    sampleTimer = setTimeout(() => {
+      void sample().finally(() => {
+        if (!stopped) scheduleNextSample();
+      });
+    }, sampleIntervalMs);
+  }
+
   async function start(): Promise<void> {
-    // Prime the rate counters, then discard the result.
+    /**
+     * Prime the rate counters, then discard the result. `currentLoad` reports
+     * load since boot on its first call and `networkStats` returns null rates
+     * until it has two observations to difference, so without this the first
+     * sample a user sees is a lifetime average rather than an interval
+     * measurement.
+     */
     try {
       await readHost();
     } catch (error) {
       logger.warn({ err: error }, 'Host metric priming read failed; rates may lag one tick');
     }
 
-    await tick();
-    timer = setInterval(() => void tick(), env.METRICS_COLLECTION_INTERVAL_MS);
+    if (stopped) return;
+
+    await sample();
+
+    if (stopped) return;
+
+    scheduleNextSample();
+    persistTimer = setInterval(() => void persist(), persistIntervalMs);
   }
 
   void start();
 
   logger.info(
-    { host: env.TELEMETRY_HOST_ID, intervalMs: env.METRICS_COLLECTION_INTERVAL_MS },
+    { host: env.TELEMETRY_HOST_ID, sampleIntervalMs, persistIntervalMs },
     'Host metric collector started',
   );
 
   return {
     latest: () => latest,
     stop: () => {
-      if (timer) clearInterval(timer);
-      timer = null;
+      stopped = true;
+      if (sampleTimer) clearTimeout(sampleTimer);
+      if (persistTimer) clearInterval(persistTimer);
+      sampleTimer = null;
+      persistTimer = null;
+      // One last write, so a rollout does not silently discard the window in
+      // progress on every replica it replaces.
+      void persist();
     },
   };
 }

@@ -73,6 +73,17 @@ const TEST_ENVIRONMENT: Record<string, string> = {
   PROBES_ENABLED: 'false',
   GITHUB_SYNC_ENABLED: 'false',
 
+  /** Deterministic alert thresholds, so the assertions state real numbers. */
+  HOST_ALERTS_ENABLED: 'true',
+  CPU_ALERT_THRESHOLD_PERCENT: '90',
+  MEMORY_ALERT_THRESHOLD_PERCENT: '90',
+  DISK_ALERT_THRESHOLD_PERCENT: '85',
+  HOST_ALERT_CRITICAL_PERCENT: '97',
+  HOST_ALERT_SUSTAINED_SAMPLES: '3',
+  HOST_ALERT_RECOVERY_SAMPLES: '5',
+
+  PROMETHEUS_METRICS_ENABLED: 'true',
+
   /**
    * The rate limiters are sized for humans. A test file makes hundreds of
    * requests from one address within a second and would trip them.
@@ -103,3 +114,17 @@ for (const key of ['FIREBASE_PROJECT_ID', 'FIREBASE_CLIENT_EMAIL', 'FIREBASE_PRI
 
 /** No token, so the polling sync stays off and nothing reaches api.github.com. */
 delete process.env.GITHUB_TOKEN;
+
+/**
+ * The scrape endpoint is exercised both open and protected; the protected case
+ * sets this itself, so the default has to be genuinely absent rather than
+ * whatever a developer's `.env` happens to carry.
+ */
+delete process.env.METRICS_SCRAPE_TOKEN;
+
+/**
+ * Removed in the observability change. Deleting it here means a developer whose
+ * `.env` predates the rename still gets a passing suite, and finds out about the
+ * rename from the server's startup error rather than from a confusing test run.
+ */
+delete process.env.METRICS_COLLECTION_INTERVAL_MS;

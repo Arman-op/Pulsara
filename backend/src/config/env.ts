@@ -108,12 +108,29 @@ const envSchema = z.object({
 
   /** Enables the host metric collector. Off in tests, which have no host to watch. */
   METRICS_COLLECTION_ENABLED: bool(true),
+
   /**
-   * Sampling period. Each tick writes one row per metric family and broadcasts
-   * to connected clients, so this is a direct trade between chart resolution
-   * and write volume.
+   * How often the operating-system counters are read.
+   *
+   * This is the live cadence: every sample is broadcast to connected clients,
+   * exposed on the scrape endpoint, and evaluated against the alert thresholds
+   * below. It is deliberately short, because a spike that lasts four seconds is
+   * still a spike somebody may need to see.
    */
-  METRICS_COLLECTION_INTERVAL_MS: int(1_000, 300_000).default(5_000),
+  METRICS_SAMPLE_INTERVAL_MS: int(500, 60_000).default(2_000),
+
+  /**
+   * How often sampled values are aggregated and written to the database.
+   *
+   * Persisting every sample was a straight waste: at a two-second cadence six
+   * metric families produce a quarter of a million rows a day per host, to draw
+   * a chart that buckets them again on read. Writing the mean of each window
+   * instead keeps the same chart and cuts the write volume by whatever ratio
+   * this bears to the sample interval.
+   *
+   * Alerting still evaluates raw samples, so aggregation cannot hide a spike.
+   */
+  METRICS_PERSIST_INTERVAL_MS: int(5_000, 3_600_000).default(30_000),
 
   /** Samples older than this are deleted by the retention sweep. */
   METRICS_RETENTION_DAYS: int(1, 365).default(7),
@@ -143,6 +160,54 @@ const envSchema = z.object({
 
   /** Trailing window over which uptime percentage and latency are computed. */
   UPTIME_WINDOW_HOURS: int(1, 24 * 90).default(24),
+
+  // --- Host alert thresholds -----------------------------------------------
+
+  /**
+   * Turns threshold alerting on. Separate from `METRICS_COLLECTION_ENABLED`
+   * because a replica may legitimately record its own telemetry while a single
+   * designated instance is the one that raises incidents from it.
+   */
+  HOST_ALERTS_ENABLED: bool(true),
+
+  /**
+   * Usage at or above these opens an incident. Defaults are the conventional
+   * "something is wrong but not yet fatal" marks; disk is lower because a full
+   * volume is unrecoverable in a way that a busy CPU is not.
+   */
+  CPU_ALERT_THRESHOLD_PERCENT: int(1, 100).default(90),
+  MEMORY_ALERT_THRESHOLD_PERCENT: int(1, 100).default(90),
+  DISK_ALERT_THRESHOLD_PERCENT: int(1, 100).default(85),
+
+  /**
+   * Usage at or above this escalates an open incident to CRITICAL, whichever
+   * metric it is. One number rather than three: the distinction between "hot"
+   * and "about to fall over" is the same distinction for all of them.
+   */
+  HOST_ALERT_CRITICAL_PERCENT: int(1, 100).default(97),
+
+  /**
+   * Hysteresis, exactly as for service probing. A single sample above the line
+   * is a garbage-collection pause or a backup starting, not an incident, and
+   * paging on it is how an alerting system gets muted.
+   */
+  HOST_ALERT_SUSTAINED_SAMPLES: int(1, 100).default(3),
+  HOST_ALERT_RECOVERY_SAMPLES: int(1, 100).default(5),
+
+  // --- Scrape endpoint -----------------------------------------------------
+
+  /** Serves `/metrics` in Prometheus text-exposition format. */
+  PROMETHEUS_METRICS_ENABLED: bool(true),
+
+  /**
+   * Optional bearer token for `/metrics`.
+   *
+   * Unset means the endpoint is open, which is the norm when it is reachable
+   * only from inside a cluster network. Set it when the port is exposed: the
+   * endpoint reports host load, service names and open incident counts, which
+   * together describe the shape of the deployment to anyone who asks.
+   */
+  METRICS_SCRAPE_TOKEN: z.string().min(16).optional(),
 
   // --- GitHub Actions integration (optional) -------------------------------
 
@@ -196,6 +261,16 @@ const envSchema = z.object({
  * Cross-field rules that cannot be expressed on an individual property.
  */
 const validatedEnvSchema = envSchema
+  .refine((value) => value.METRICS_PERSIST_INTERVAL_MS >= value.METRICS_SAMPLE_INTERVAL_MS, {
+    path: ['METRICS_PERSIST_INTERVAL_MS'],
+    message:
+      'METRICS_PERSIST_INTERVAL_MS must be at least METRICS_SAMPLE_INTERVAL_MS; there is nothing to aggregate if the write is more frequent than the read',
+  })
+  .refine((value) => value.HOST_ALERT_CRITICAL_PERCENT >= value.CPU_ALERT_THRESHOLD_PERCENT, {
+    path: ['HOST_ALERT_CRITICAL_PERCENT'],
+    message:
+      'HOST_ALERT_CRITICAL_PERCENT must be at least CPU_ALERT_THRESHOLD_PERCENT, otherwise every incident opens already critical',
+  })
   .refine((value) => value.JWT_ACCESS_SECRET !== value.JWT_REFRESH_SECRET, {
     path: ['JWT_REFRESH_SECRET'],
     message:
@@ -229,7 +304,36 @@ function formatIssues(error: z.ZodError): string {
     .join('\n');
 }
 
+/**
+ * Variables that used to exist, and what replaced them.
+ *
+ * A Zod object ignores keys it does not know, so removing a variable silently
+ * demotes anyone still setting it to the new defaults — the configuration looks
+ * applied and is not. Naming the removals turns that into a startup error with
+ * the answer in it.
+ */
+const REMOVED_VARIABLES: Record<string, string> = {
+  METRICS_COLLECTION_INTERVAL_MS:
+    'replaced by METRICS_SAMPLE_INTERVAL_MS (live cadence) and METRICS_PERSIST_INTERVAL_MS (database writes)',
+};
+
+function findRemovedVariables(): string[] {
+  return Object.entries(REMOVED_VARIABLES)
+    .filter(([name]) => process.env[name] !== undefined)
+    .map(([name, guidance]) => `  - ${name}: ${guidance}`);
+}
+
 function loadEnv(): Env {
+  const removed = findRemovedVariables();
+
+  if (removed.length > 0) {
+    process.stderr.write(
+      `\nPulsara API cannot start: the environment sets variables that no longer exist.\n\n` +
+        `${removed.join('\n')}\n\n`,
+    );
+    process.exit(1);
+  }
+
   const parsed = validatedEnvSchema.safeParse(process.env);
 
   if (!parsed.success) {
@@ -258,6 +362,9 @@ export const isTest = env.NODE_ENV === 'test';
  * which half is missing.
  */
 export const isGitHubPollingConfigured = Boolean(env.GITHUB_TOKEN);
+
+/** Whether the scrape endpoint requires a bearer token. */
+export const isMetricsScrapeProtected = Boolean(env.METRICS_SCRAPE_TOKEN);
 export const isGitHubWebhookConfigured = Boolean(env.GITHUB_WEBHOOK_SECRET);
 
 /** Whether federated sign-in is configured for this deployment. */
