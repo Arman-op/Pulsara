@@ -142,14 +142,45 @@ deployment with no path back.
 Without this configured, the Pipelines view says so plainly. It never shows
 placeholder pipelines.
 
-**1. Create a token.** A fine-grained personal access token with **Actions:
-Read-only** on the repositories you want to mirror. Put it in `backend/.env`:
+**1. Choose a credential.** Exactly one — configuring both is rejected at
+startup, since which one is talking to GitHub would otherwise depend on code
+order rather than on configuration.
+
+*A GitHub App* — the right answer for anything deployed, because a token is
+somebody's personal credential and stops working the day they leave. Create one
+at *Settings → Developer settings → GitHub Apps* with repository permissions
+**Actions: Read-only** and **Metadata: Read-only**, subscribe it to the
+**Workflow run** and **Workflow job** events, install it on the account that
+owns the repository, then:
+
+```bash
+# Convert the .pem GitHub gave you into a single-line value
+node -e "console.log(JSON.stringify(require('fs').readFileSync(process.argv[1],'utf8')))" app.pem
+```
+
+```
+GITHUB_APP_ID=123456
+GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----\n"
+```
+
+*A fine-grained PAT* — fine for a laptop. **Actions: Read-only** and
+**Metadata: Read-only** on the repositories you want to mirror:
 
 ```
 GITHUB_TOKEN=github_pat_...
 ```
 
-**2. Connect a repository** (as an `ADMIN` user):
+The full comparison is in
+[ARCHITECTURE.md](./ARCHITECTURE.md#9-cicd-mirroring-github-actions).
+
+**2. Name the repository to mirror.** It is connected and backfilled at startup,
+so the Pipelines page has real content on first boot:
+
+```
+GITHUB_MONITORED_REPO=your-org/your-repo
+```
+
+Further repositories can be connected at runtime, as an `ADMIN` user:
 
 ```bash
 curl -X POST http://localhost:4000/api/integrations/github/connections \
@@ -158,14 +189,15 @@ curl -X POST http://localhost:4000/api/integrations/github/connections \
   -d '{"owner":"your-org","name":"your-repo"}'
 ```
 
-The repository is verified against the API before it is stored, so a typo fails
-immediately instead of becoming a connection that silently never syncs. Recent
-runs are backfilled straight away.
+Either way the repository is verified against the API before it is stored, so a
+typo fails immediately instead of becoming a connection that silently never
+syncs, and recent runs are backfilled straight away.
 
 **3. Add a webhook (optional, for live updates).** In the repository's
 *Settings → Webhooks*:
 
 - Payload URL: `https://your-host/api/integrations/github/webhook`
+  (a GitHub App carries this on the App itself rather than per repository)
 - Content type: `application/json`
 - Secret: generate with `openssl rand -base64 32` and set the same value as
   `GITHUB_WEBHOOK_SECRET` in `backend/.env`

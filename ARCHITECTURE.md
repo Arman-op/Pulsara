@@ -96,7 +96,7 @@ backend/
       telemetry/           Host collector, probe scheduler, retention, reads
       metrics/             Prometheus exposition on GET /metrics
       deployments/         Delivery history reads
-      github/              GitHub client, webhook receiver, sync
+      github/              GitHub auth, client, webhook receiver, sync
       incidents/           Alerting engines, incident CRUD and timeline
     realtime/io.ts       Authenticated WebSocket transport and publisher
     app.ts               Middleware pipeline and route mounting
@@ -556,6 +556,61 @@ useful even when the alerting on top of them is not.
 Deployments were previously five rows written by the seed script, with
 `Math.random()` durations and stages named Build/Test/Deploy that corresponded
 to nothing that had ever executed. Every row is now a real workflow run.
+
+### A GitHub App, or a personal access token
+
+Both are supported and exactly one may be configured; setting both is a startup
+error, because which credential is talking to GitHub would otherwise depend on
+code order rather than on configuration.
+
+| | GitHub App | Fine-grained PAT |
+| :--- | :--- | :--- |
+| Identity | The application | A person |
+| Survives an offboarding | Yes | No — dies with the account |
+| Rate limit | 5,000/hour per installation, scaling with installation size | 5,000/hour shared with everything else that person's token does |
+| Scope | Repositories the installation is granted, changeable without new credentials | Fixed at issue time; widening means minting a new token |
+| Credential lifetime | Installation token expires in an hour and is renewed automatically | Up to a year, sitting in an environment variable the whole time |
+| Revocation | Uninstall | Find and delete the right token |
+| Setup cost | Create an App, install it, convert a PEM | Tick two boxes |
+
+**A GitHub App is the right answer for anything deployed**, and not mainly for
+the rate limit. It is that a token is somebody's personal credential: it carries
+their access, appears in the audit log as them, and stops working the day they
+leave — a class of outage that arrives weeks after the change that caused it
+and looks like nothing at all until somebody asks why pipelines stopped
+updating. An App is the service's own identity, which is what the service
+actually needs.
+
+A token remains supported because on a laptop the App flow is three steps of
+ceremony to read a public repository, and making the development path harder
+than it needs to be has its own cost.
+
+The App path is two hops. A JWT signed with the App's private key (RS256, `iat`
+backdated a minute against clock skew, `exp` inside GitHub's ten-minute ceiling)
+proves *"I am this App"*. Exchanging it for an installation access token proves
+*"and I am acting for this installation"* — and only the second can read a
+repository. That token lasts an hour, so it is cached and renewed five minutes
+early, behind a single-flight guard: GitHub invalidates nothing when it issues
+another, so duplicate minting is waste that never announces itself.
+
+The installation is discovered when the App has exactly one, and must be named
+once it has more. Choosing arbitrarily between two would mirror the wrong
+organisation's pipelines and look, from the dashboard, exactly like a repository
+that had gone quiet.
+
+### The monitored repository is configuration, not a setup step
+
+`GITHUB_MONITORED_REPO` is registered and backfilled during startup. Without it
+a correctly configured deployment still shows an empty pipelines page until
+somebody remembers to POST a connection — which is indistinguishable from a
+broken integration.
+
+It runs once. Re-verifying and re-backfilling on every boot would spend rate
+limit re-reading runs already stored, and would quietly resurrect a repository
+an operator had deliberately disconnected. Failure is logged and swallowed: a
+GitHub outage, a revoked credential or a renamed repository must not stop the
+API from starting, because every other part of the product works without CI
+data, and the connection's `lastSyncError` is where the reason belongs.
 
 ### Webhooks for freshness, polling for correctness
 
