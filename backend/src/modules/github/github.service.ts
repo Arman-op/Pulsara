@@ -3,6 +3,7 @@ import { CiProvider } from '@prisma/client';
 import { env } from '../../config/env';
 import { prisma } from '../../db/prisma';
 import { logger } from '../../lib/logger';
+import { evaluateDeploymentHealth } from '../incidents/deployment-alert-engine';
 import {
   getRepository,
   listRunJobs,
@@ -24,10 +25,25 @@ import { mapWorkflowJob, mapWorkflowRun } from './github.mapper';
 /** Truncates a message to fit the column, keeping the useful prefix. */
 const MAX_SYNC_ERROR_LENGTH = 500;
 
+/**
+ * Identifies the workflow a run belongs to, for alerting.
+ *
+ * Returned rather than acted on here: persistence should not decide whether
+ * something is worth paging about, and the two call sites want different
+ * timing — a webhook evaluates immediately, a backfill evaluates once per
+ * workflow after the whole sweep rather than thirty times.
+ */
+export type RecordedRun = {
+  id: string;
+  repo: string;
+  branch: string;
+  workflowName: string | null;
+};
+
 export async function upsertDeploymentFromRun(
   run: GitHubWorkflowRun,
   repoFullName: string,
-): Promise<string> {
+): Promise<RecordedRun> {
   const mapped = mapWorkflowRun(run, repoFullName);
 
   const connection = await prisma.repoConnection.findFirst({
@@ -64,7 +80,12 @@ export async function upsertDeploymentFromRun(
     select: { id: true },
   });
 
-  return deployment.id;
+  return {
+    id: deployment.id,
+    repo: mapped.repo,
+    branch: mapped.branch,
+    workflowName: mapped.workflowName,
+  };
 }
 
 export async function upsertStageFromJob(job: GitHubWorkflowJob): Promise<void> {
@@ -130,8 +151,24 @@ export async function syncConnection(connection: RepoConnection): Promise<number
 
     const repoFullName = `${connection.owner}/${connection.name}`;
 
+    /**
+     * Workflows touched by this sweep, evaluated once each at the end. A
+     * thirty-run backfill would otherwise ask the same question thirty times
+     * and get the same answer, since the engine decides from the newest run
+     * rather than from the one that just arrived.
+     */
+    const touched = new Map<
+      string,
+      { repo: string; branch: string; workflowName: string | null }
+    >();
+
     for (const run of result.data) {
-      const deploymentId = await upsertDeploymentFromRun(run, repoFullName);
+      const recorded = await upsertDeploymentFromRun(run, repoFullName);
+      touched.set(`${recorded.repo}::${recorded.workflowName ?? ''}::${recorded.branch}`, {
+        repo: recorded.repo,
+        branch: recorded.branch,
+        workflowName: recorded.workflowName,
+      });
 
       /**
        * Jobs are only fetched for runs that have finished or are in flight, and
@@ -148,10 +185,14 @@ export async function syncConnection(connection: RepoConnection): Promise<number
       } catch (error) {
         // A failure fetching one run's jobs must not abandon the whole sync.
         logger.warn(
-          { err: error, runId: run.id, deploymentId },
+          { err: error, runId: run.id, deploymentId: recorded.id },
           'Could not fetch jobs for run; deployment recorded without stages',
         );
       }
+    }
+
+    for (const key of touched.values()) {
+      await evaluateDeploymentHealth(key);
     }
 
     await prisma.repoConnection.update({

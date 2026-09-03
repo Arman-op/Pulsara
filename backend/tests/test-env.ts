@@ -84,6 +84,10 @@ const TEST_ENVIRONMENT: Record<string, string> = {
 
   PROMETHEUS_METRICS_ENABLED: 'true',
 
+  /** Deterministic delivery-alert thresholds. */
+  DEPLOYMENT_ALERTS_ENABLED: 'true',
+  DEPLOYMENT_FAILURE_ESCALATION_RUNS: '3',
+
   /**
    * The rate limiters are sized for humans. A test file makes hundreds of
    * requests from one address within a second and would trip them.

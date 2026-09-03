@@ -5,6 +5,7 @@ import { BadRequestError, UnauthenticatedError, UpstreamUnavailableError } from 
 import { sendSuccess } from '../../lib/http';
 import { logger } from '../../lib/logger';
 import type { GitHubWorkflowJob, GitHubWorkflowRun } from './github.client';
+import { evaluateDeploymentHealth } from '../incidents/deployment-alert-engine';
 import { upsertDeploymentFromRun, upsertStageFromJob } from './github.service';
 
 /**
@@ -111,11 +112,23 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
 
     case 'workflow_run': {
       const body = payload as WorkflowRunEvent;
-      await upsertDeploymentFromRun(body.workflow_run, body.repository.full_name);
+      const recorded = await upsertDeploymentFromRun(body.workflow_run, body.repository.full_name);
       log.info(
         { deliveryId, runId: body.workflow_run.id, action: body.action },
         'Recorded workflow run from webhook',
       );
+
+      /**
+       * Awaited before responding, deliberately. GitHub allows ten seconds and
+       * this is one indexed query plus at most one write; detaching it would
+       * mean a delivery could be acknowledged and then lost to a restart,
+       * leaving a broken build with no incident and nothing to say why.
+       */
+      await evaluateDeploymentHealth({
+        repo: recorded.repo,
+        branch: recorded.branch,
+        workflowName: recorded.workflowName,
+      });
       break;
     }
 

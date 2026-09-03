@@ -290,6 +290,20 @@ const envSchema = z.object({
   GITHUB_BACKFILL_RUNS: int(1, 100).default(30),
 
   /**
+   * Opens an incident when the default branch's workflow is failing. Separate
+   * from the mirroring itself: a team may want the delivery history visible
+   * without a broken build paging anyone.
+   */
+  DEPLOYMENT_ALERTS_ENABLED: bool(true),
+
+  /**
+   * Consecutive failed runs after which the incident escalates to CRITICAL. A
+   * build broken for three runs running is a different problem from one that
+   * has just gone red.
+   */
+  DEPLOYMENT_FAILURE_ESCALATION_RUNS: int(2, 50).default(3),
+
+  /**
    * Federated sign-in via Firebase is optional. The three credential fields
    * are all-or-nothing: a partial configuration is a mistake, and treating it
    * as "disabled" would hide a broken production deployment behind a working

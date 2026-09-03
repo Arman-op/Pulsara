@@ -11,8 +11,9 @@ import { logger } from '../../lib/logger';
 /**
  * The write path every automated alert source shares.
  *
- * There are two sources now — service reachability and host resource pressure —
- * and they agree on everything that matters: an incident is identified by the
+ * There are three sources — service reachability, host resource pressure and
+ * delivery failures — and they agree on everything that matters: an incident is
+ * identified by the
  * *condition* rather than the occurrence, severity escalates but never falls
  * while an incident is open, a duplicate open is a race to be absorbed rather
  * than an error, and only what a machine opened may a machine close.
@@ -56,6 +57,21 @@ export type IncidentCondition = {
   serviceId?: string | null;
   /** Identifies the subject in logs, e.g. a service or metric name. */
   subject: string;
+  /**
+   * Whether to keep the stored title and description current on every
+   * evaluation, rather than only when severity rises.
+   *
+   * On by default it would be wrong: the host engine puts the live reading in
+   * its description, so refreshing on every sample would mean a write every two
+   * seconds for as long as an incident stayed open, to restate a number the
+   * telemetry chart already shows.
+   *
+   * Off by default it is wrong for delivery: "failed for 1 run", linking the
+   * first failure, is what an engineer reads while the build has been broken
+   * for six — and the newest run is the one they want to open. That condition
+   * changes at most once per run, so restating it is cheap and correct.
+   */
+  restate?: boolean;
 };
 
 /**
@@ -76,7 +92,24 @@ export async function openOrEscalateIncident(condition: IncidentCondition): Prom
      * would quietly drop it below whatever threshold a human is watching, in
      * the middle of the event.
      */
-    if (severityRank(condition.severity) <= severityRank(existing.severity)) return false;
+    if (severityRank(condition.severity) <= severityRank(existing.severity)) {
+      /**
+       * Severity has not risen, but the facts may still have moved on. This
+       * updates the row without appending to the timeline: a build failing for
+       * a sixth time is the same incident, and an entry per run would bury the
+       * transitions that actually mean something.
+       */
+      if (
+        condition.restate &&
+        (existing.title !== condition.title || existing.description !== condition.description)
+      ) {
+        await prisma.incident.update({
+          where: { id: existing.id },
+          data: { title: condition.title, description: condition.description },
+        });
+      }
+      return false;
+    }
 
     await prisma.$transaction([
       prisma.incident.update({
