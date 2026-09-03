@@ -292,6 +292,24 @@ Set `METRICS_SCRAPE_TOKEN` if the port is reachable from outside the cluster;
 the scraper then needs `authorization: Bearer <token>`. The response names every
 monitored service, reports host saturation and counts open incidents.
 
+### Scaling out
+
+Probing and caching both use Redis when `REDIS_URL` is set, and neither is
+required:
+
+```
+REDIS_URL=redis://localhost:6380
+```
+
+Without it, probes run on an in-process timer and reads go to PostgreSQL — right
+for one instance, wrong for several, because every replica would probe every
+service and multiply load on the endpoints being measured. With it, a BullMQ
+repeatable job sweeps once across the fleet while the probes spread over every
+instance, and `/api/services` and `/api/deployments` are served from a
+short-lived cache that every write invalidates.
+
+`docker compose up -d` starts Redis on 6380 alongside PostgreSQL on 5433.
+
 ### Where incidents come from
 
 | Source | Opens when | Resolves when |
@@ -345,7 +363,7 @@ automatically. Thresholds are per resource; see `backend/.env.example`.
 | `npm run format` | Prettier |
 | `npm test` | Unit and integration suites |
 | `npm run test:unit` | Pure logic only; needs no database |
-| `npm run test:integration` | Real HTTP against a real PostgreSQL |
+| `npm run test:integration` | Real HTTP against a real PostgreSQL and Redis |
 | `npm run db:migrate` | Create/apply a migration in development |
 | `npm run db:deploy` | Apply pending migrations (production) |
 | `npm run db:seed` | First admin + service catalogue |
@@ -368,8 +386,8 @@ automatically. Thresholds are per resource; see `backend/.env.example`.
 ## Tests
 
 ```bash
-cd backend  && npm run test:unit         # no database required
-docker compose up -d postgres            # for the integration suite
+cd backend  && npm run test:unit   # no infrastructure required
+docker compose up -d               # PostgreSQL and Redis, for the integration suite
 cd backend  && npm test
 cd frontend && npm test
 ```
@@ -384,6 +402,11 @@ pass just as happily with all three removed.
 It creates and migrates a `pulsara_test` database on first run, and refuses to
 run against any database whose name does not end in `_test` — it truncates every
 table between cases. Override the target with `TEST_DATABASE_URL`.
+
+The cache and probe-queue suites need Redis, for the same reason: what is worth
+testing there — that invalidation actually deletes, that two schedulers do not
+double-probe — is behaviour of the broker, not of the code calling it. Override
+with `TEST_REDIS_URL`.
 
 ---
 

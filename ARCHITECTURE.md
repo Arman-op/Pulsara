@@ -76,8 +76,11 @@ backend/
     config/
       env.ts             Zod-validated environment; process exits if invalid
       constants.ts       Fixed values that are the same in every environment
-    db/prisma.ts         One PrismaClient for the process
+    db/
+      prisma.ts          One PrismaClient for the process
+      redis.ts           Optional Redis, for the probe queue and the cache
     lib/
+      cache.ts           Read-through cache with write invalidation
       errors.ts          Typed error hierarchy
       http.ts            The single response envelope
       logger.ts          Structured (pino) logging with redaction
@@ -324,6 +327,33 @@ a real handshake.
   connect to on a timer is a server-side request forgery primitive if accepted
   carelessly, so HTTP targets are restricted to `http`/`https` without embedded
   credentials, and TCP targets to `host:port`.
+
+### Probing is distributed when Redis is available
+
+The in-process timer is correct for one instance and wrong for several. Every
+replica would find the same due services and probe all of them: load on the
+endpoints being measured multiplies by replica count, the extra contention
+inflates the very latencies the probes exist to report, and interleaved writes
+make the consecutive-result counters stop meaning what they say — "three
+failures in a row" would be three replicas observing one failure each.
+
+With `REDIS_URL` set, a BullMQ repeatable job does the sweeping and every
+instance runs workers, so the sweep is singular across the fleet while the
+probes themselves spread over it. BullMQ keeps one schedule per key however many
+instances register it, which supplies the leader election without any of our
+own. Each enqueued check carries a deterministic job id built from the service
+and its last check time, so a sweep that somehow runs twice — a redeploy
+overlapping a schedule, a clock jump — still produces one check per service.
+
+Redis stays optional. Requiring a broker to run the application locally is a
+cost paid by everyone who clones the repository, and what it buys is an
+improvement on a working baseline rather than a prerequisite for one. What it
+must never be is a *silent* dependency: if `REDIS_URL` is set and Redis is
+unreachable, that is a configuration error and it is logged as one.
+
+Completed jobs are kept only briefly. Every observation is already in
+PostgreSQL, and retaining job history would make Redis a second, worse copy of
+the same record.
 
 ### Status is a state machine with hysteresis
 
@@ -837,7 +867,65 @@ a working system with nothing to report rather than as a broken one.
 
 ---
 
-## 12. Observability and lifecycle
+## 12. Caching
+
+Two endpoints do real work per request. `/api/services` runs a window function
+over every stored probe result to derive uptime and latency percentiles;
+`/api/deployments` joins stages onto a paginated run history. Every open
+dashboard asks for both every thirty seconds, so without a cache the same
+expensive answer is computed once per tab per interval.
+
+The risk in caching a monitoring product is obvious: this whole system exists to
+argue against showing numbers nobody measured, and a cache is a machine for
+showing old ones. Three rules keep it honest.
+
+**The TTL is short and bounds only unannounced staleness.** Ten seconds by
+default. It is a shock absorber for repeated polling, not storage.
+
+**Writes invalidate immediately.** A service changing state, a run landing, an
+operator editing the catalogue — each clears the keys it affects, so the cache
+is never the reason somebody sees an outage late.
+
+A probe invalidates on a state *transition*, not on every observation. That is a
+correction, and it came from watching a running system rather than from reading
+the code: observing is the common case, a healthy fleet produces a result per
+service per interval and changes nothing, and clearing the cache each time left
+it empty within seconds of being filled. A cache with no hit rate is complexity
+bought with nothing. What an observation actually moves is `lastCheckedAt` and a
+set of aggregates windowed over twenty-four hours, and letting those sit for ten
+seconds is not the staleness this system cares about — whether a service is up
+is, and a transition is exactly that.
+
+Invalidation happens **after** the write, never before. Clearing first leaves a
+window in which a concurrent read repopulates from the pre-write state, and that
+value then survives a full TTL — the one ordering mistake that turns a cache
+into a source of wrong answers.
+
+**A cache failure is a miss, never an error.** Redis down degrades to the
+uncached behaviour, which is simply how the system runs without Redis at all. A
+failed invalidation is logged and the write still succeeds: at most somebody
+sees a stale figure for one TTL, which is a far smaller problem than refusing to
+register a service.
+
+Nothing user-specific is cached. Both endpoints return the same bytes to every
+authenticated caller, which is what makes a shared key safe; the discriminator
+includes the filters and the page, so two callers asking different questions
+never share an answer.
+
+Keys are fully qualified by the code that builds them rather than by ioredis's
+`keyPrefix`. That option is applied to command arguments but not to the pattern
+`SCAN` matches against, so a prefixed connection means keys are written with the
+prefix, scanned for with a pattern that repeats it by hand, and then deleted
+with the prefix applied a second time — an invalidation that silently deletes
+nothing. It did, until a test caught it.
+
+`UNLINK` rather than `DEL`, and `SCAN` rather than `KEYS`: reclaiming memory
+moves to a background thread, and nothing blocks the server for the length of a
+scan, which on a shared Redis would be somebody else's outage.
+
+---
+
+## 13. Observability and lifecycle
 
 ### The system is scrapeable, not just viewable
 
@@ -898,7 +986,7 @@ current weak points of a deployment to anyone who asks.
 
 ---
 
-## 13. Testing
+## 14. Testing
 
 The suite is split by what it needs, not by what it covers.
 
@@ -939,7 +1027,7 @@ error rather than as a healthy fleet.
 
 ---
 
-## 14. Packaging and delivery
+## 15. Packaging and delivery
 
 ### Images
 
@@ -1006,7 +1094,7 @@ change under review.
 
 ---
 
-## 15. Implementation status
+## 16. Implementation status
 
 | Area | State |
 | :--- | :--- |

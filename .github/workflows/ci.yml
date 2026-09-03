@@ -41,8 +41,23 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
+      # The cache and probe-queue suites run against a real Redis for the same
+      # reason the rest run against a real PostgreSQL: what is worth testing —
+      # that invalidation actually deletes, that two schedulers do not double
+      # probe — is behaviour of the broker, not of the code calling it.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
     env:
       TEST_DATABASE_URL: postgresql://pulsara:pulsara_ci@localhost:5432/pulsara_test
+      TEST_REDIS_URL: redis://localhost:6379
       # Present so that Prisma's CLI has a datasource; the suite overrides the
       # runtime value with TEST_DATABASE_URL.
       DATABASE_URL: postgresql://pulsara:pulsara_ci@localhost:5432/pulsara_test

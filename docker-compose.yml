@@ -17,11 +17,11 @@
 # on a clean checkout — and hard-coded `JWT_SECRET=production_secret_change_me`,
 # a value the API now refuses to start with.
 #
-# There is no Redis service. Nothing in the system uses one: rate limiting is
-# in-process, the realtime transport is a single Socket.IO server, and every
-# derived figure is computed in PostgreSQL on read. Adding a cache before there
-# is anything to cache would be infrastructure to maintain and nothing to show
-# for it.
+# Redis is here because two things now use it: the probe queue, which makes the
+# sweep singular across replicas instead of multiplying probes by replica count,
+# and the read cache in front of the two endpoints that cost real work. It stays
+# optional — without REDIS_URL the API probes on an in-process timer and reads
+# go straight to PostgreSQL, which is correct for a single instance.
 
 services:
   postgres:
@@ -46,6 +46,32 @@ services:
     networks:
       - pulsara
 
+  redis:
+    image: redis:7-alpine
+    container_name: pulsara-redis-dev
+    ports:
+      # Not 6379, for the same reason PostgreSQL is not on 5432: a developer
+      # commonly has one already bound there.
+      - '6380:6379'
+    command:
+      # Bounded and evicting, because everything stored here is a cache entry or
+      # a transient job — nothing is a record of anything. An unbounded Redis
+      # that fills up starts refusing writes, which would take the probe queue
+      # down with it.
+      - redis-server
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - allkeys-lru
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - pulsara
+
   api:
     profiles: ['app']
     build:
@@ -62,12 +88,16 @@ services:
       # The browser reaches the client on the published port below, so that is
       # the origin the API must allow.
       CORS_ORIGINS: http://localhost:5174
+      # In-network name and port, not the published one.
+      REDIS_URL: redis://redis:6379
     ports:
       - '4000:4000'
     depends_on:
       postgres:
         # Waits for the healthcheck, not merely for the container to exist —
         # otherwise the API starts, fails to connect, and exits.
+        condition: service_healthy
+      redis:
         condition: service_healthy
     restart: unless-stopped
     networks:
