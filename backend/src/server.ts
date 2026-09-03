@@ -117,10 +117,15 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
   try {
     // Stop producing before stopping the transport, so nothing tries to publish
     // to a closed socket server on the way out.
-    hostCollector?.stop();
     probeScheduler?.stop();
     retentionJob.stop();
     githubSync?.stop();
+    /**
+     * Awaited, unlike the others: stopping the collector flushes the window it
+     * has accumulated since the last write, and the database pool is closed a
+     * few lines below.
+     */
+    await hostCollector?.stop();
 
     await shutdownRealtimeServer(io);
     await new Promise<void>((resolve, reject) => {

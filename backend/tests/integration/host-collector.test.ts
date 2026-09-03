@@ -53,8 +53,13 @@ beforeEach(async () => {
   resetDiskCache();
 });
 
-afterEach(() => {
-  collector?.stop();
+afterEach(async () => {
+  /**
+   * Awaited so the collector's final flush lands before the next case
+   * truncates: a detached write would otherwise arrive after `resetDatabase`
+   * and appear as rows that case never created.
+   */
+  await collector?.stop();
   collector = null;
 });
 
@@ -182,15 +187,12 @@ describe('startHostCollector', () => {
 
       expect(await prisma.metric.count()).toBe(0);
 
-      running.stop();
+      // `stop` resolves only once the flush has landed, so no polling is needed
+      // and the assertion is exact rather than eventual.
+      await running.stop();
       collector = null;
 
-      await eventually(
-        async () => {
-          expect(await prisma.metric.count()).toBeGreaterThan(0);
-        },
-        { timeoutMs: BUDGET_MS },
-      );
+      expect(await prisma.metric.count()).toBeGreaterThan(0);
     },
     SLOW,
   );
@@ -212,7 +214,7 @@ describe('startHostCollector', () => {
         { timeoutMs: BUDGET_MS },
       );
 
-      running.stop();
+      await running.stop();
       collector = null;
 
       // A self-pacing loop reschedules from inside the read, so stopping has to

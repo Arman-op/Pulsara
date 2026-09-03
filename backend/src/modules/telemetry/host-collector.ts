@@ -249,7 +249,14 @@ function accumulate(windows: Map<MetricTypeName, Window>, samples: Sample[]): vo
 export type HostCollector = {
   /** The most recent snapshot, so a newly connected client gets data at once. */
   latest: () => HostSnapshot | null;
-  stop: () => void;
+  /**
+   * Stops both clocks and resolves once the window in progress has been
+   * written. Awaitable rather than fire-and-forget because the caller closes
+   * the database pool immediately afterwards, and a detached final write races
+   * that disconnect — losing, on every rollout, the last window of telemetry
+   * from every replica being replaced.
+   */
+  stop: () => Promise<void>;
 };
 
 /**
@@ -385,7 +392,7 @@ export function startHostCollector(
 
   return {
     latest: () => latest,
-    stop: () => {
+    stop: async () => {
       stopped = true;
       if (sampleTimer) clearTimeout(sampleTimer);
       if (persistTimer) clearInterval(persistTimer);
@@ -393,7 +400,7 @@ export function startHostCollector(
       persistTimer = null;
       // One last write, so a rollout does not silently discard the window in
       // progress on every replica it replaces.
-      void persist();
+      await persist();
     },
   };
 }
