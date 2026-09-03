@@ -1,8 +1,8 @@
 import { formatDistanceToNow } from 'date-fns';
-import { AlertCircle, AlertTriangle, CheckCircle2, Info, Loader2 } from 'lucide-react';
+import { AlertCircle, AlertTriangle, CheckCircle2, Info, Loader2, Plus } from 'lucide-react';
 import * as React from 'react';
 import { ApiError, apiRequest } from '../../shared/api/client';
-import type { Incident, IncidentStatus, Severity } from '../../shared/api/types';
+import type { Incident, IncidentStatus, Service, Severity } from '../../shared/api/types';
 import { useApi } from '../../shared/api/useApi';
 import { Badge } from '../../shared/components/Badge';
 import { Card, CardContent, CardHeader, CardTitle } from '../../shared/components/Card';
@@ -31,6 +31,8 @@ import { useToastStore } from '../../shared/store/toastStore';
 const POLL_MS = 20_000;
 
 const STATUS_FLOW: IncidentStatus[] = ['INVESTIGATING', 'IDENTIFIED', 'MONITORING', 'RESOLVED'];
+
+const SEVERITIES: Severity[] = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
 
 function SeverityIcon({ severity }: { severity: Severity }) {
   switch (severity) {
@@ -146,17 +148,45 @@ function IncidentDetail({ incidentId, onChanged }: { incidentId: string; onChang
       </dl>
 
       {canMutate(role) && (
-        <div className="flex flex-wrap gap-2">
-          {STATUS_FLOW.filter((status) => status !== data.status).map((status) => (
-            <button
-              key={status}
+        <div className="space-y-3">
+          <div className="flex flex-wrap gap-2">
+            {STATUS_FLOW.filter((status) => status !== data.status).map((status) => (
+              <button
+                key={status}
+                disabled={isSaving}
+                onClick={() => void mutate({ status }, `Marked ${status.toLowerCase()}`)}
+                className="text-xs px-2.5 py-1.5 rounded-md border border-border text-muted hover:text-white hover:bg-surface transition-colors disabled:opacity-50"
+              >
+                {status === 'RESOLVED' ? 'Resolve' : `Mark ${status.toLowerCase()}`}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-muted" htmlFor="incident-severity">
+              Severity
+            </label>
+            <select
+              id="incident-severity"
+              value={data.severity}
               disabled={isSaving}
-              onClick={() => void mutate({ status }, `Marked ${status.toLowerCase()}`)}
-              className="text-xs px-2.5 py-1.5 rounded-md border border-border text-muted hover:text-white hover:bg-surface transition-colors disabled:opacity-50"
+              onChange={(event) =>
+                void mutate(
+                  { severity: event.target.value },
+                  `Severity set to ${event.target.value.toLowerCase()}`,
+                )
+              }
+              className="text-xs px-2 py-1.5 rounded-md bg-surface border border-border text-white focus:ring-2 focus:ring-accent outline-none disabled:opacity-50"
             >
-              {status === 'RESOLVED' ? 'Resolve' : `Mark ${status.toLowerCase()}`}
-            </button>
-          ))}
+              {SEVERITIES.map((severity) => (
+                <option key={severity} value={severity}>
+                  {severity}
+                </option>
+              ))}
+            </select>
+            {/* Every change here is recorded on the timeline and in the
+                administrator-only audit trail, with the before and after. */}
+          </div>
         </div>
       )}
 
@@ -205,8 +235,149 @@ function IncidentDetail({ incidentId, onChanged }: { incidentId: string; onChang
   );
 }
 
+/**
+ * Opening an incident by hand.
+ *
+ * Not a concession to the demo: operators genuinely raise incidents the
+ * monitoring cannot see — a customer report, a bad configuration change, a
+ * dependency somebody else runs. What matters is that it goes through the same
+ * CRUD, validation and timeline as everything else, and that the result is
+ * labelled as human-raised so it reads differently from a machine's finding.
+ */
+function NewIncidentForm({ onCreated, onCancel }: { onCreated: () => void; onCancel: () => void }) {
+  const addToast = useToastStore((store) => store.addToast);
+  const services = useApi<Service[]>('/services');
+
+  const [title, setTitle] = React.useState('');
+  const [description, setDescription] = React.useState('');
+  const [severity, setSeverity] = React.useState<Severity>('MEDIUM');
+  const [serviceId, setServiceId] = React.useState('');
+  const [isSaving, setIsSaving] = React.useState(false);
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setIsSaving(true);
+
+    try {
+      await apiRequest('/incidents', {
+        method: 'POST',
+        body: {
+          title: title.trim(),
+          severity,
+          // Omitted rather than sent empty: the server validates a service id
+          // as a UUID, and an empty string is not one.
+          ...(description.trim() ? { description: description.trim() } : {}),
+          ...(serviceId ? { serviceId } : {}),
+        },
+      });
+      addToast({ type: 'success', title: 'Incident opened' });
+      onCreated();
+    } catch (caught) {
+      addToast({
+        type: 'error',
+        title: 'Could not open the incident',
+        message: caught instanceof ApiError ? caught.message : 'Something went wrong',
+      });
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <form onSubmit={submit} className="space-y-4 text-sm">
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium text-white" htmlFor="new-incident-title">
+          What is happening?
+        </label>
+        <input
+          id="new-incident-title"
+          value={title}
+          onChange={(event) => setTitle(event.target.value)}
+          required
+          maxLength={200}
+          placeholder="Checkout is returning 500s for some customers"
+          className="w-full rounded-md bg-surface border border-border p-2 text-sm text-white focus:ring-2 focus:ring-accent outline-none"
+        />
+      </div>
+
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium text-white" htmlFor="new-incident-description">
+          Detail <span className="text-muted font-normal">(optional)</span>
+        </label>
+        <textarea
+          id="new-incident-description"
+          value={description}
+          onChange={(event) => setDescription(event.target.value)}
+          rows={4}
+          maxLength={5000}
+          placeholder="What you know so far, and where you looked."
+          className="w-full rounded-md bg-surface border border-border p-2 text-sm text-white focus:ring-2 focus:ring-accent outline-none"
+        />
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-white" htmlFor="new-incident-severity">
+            Severity
+          </label>
+          <select
+            id="new-incident-severity"
+            value={severity}
+            onChange={(event) => setSeverity(event.target.value as Severity)}
+            className="w-full rounded-md bg-surface border border-border p-2 text-sm text-white focus:ring-2 focus:ring-accent outline-none"
+          >
+            {SEVERITIES.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-white" htmlFor="new-incident-service">
+            Service <span className="text-muted font-normal">(optional)</span>
+          </label>
+          <select
+            id="new-incident-service"
+            value={serviceId}
+            onChange={(event) => setServiceId(event.target.value)}
+            className="w-full rounded-md bg-surface border border-border p-2 text-sm text-white focus:ring-2 focus:ring-accent outline-none"
+          >
+            <option value="">Not service-specific</option>
+            {(services.data ?? []).map((service) => (
+              <option key={service.id} value={service.id}>
+                {service.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="flex gap-2 pt-1">
+        <button
+          type="submit"
+          disabled={isSaving || title.trim().length === 0}
+          className="text-xs px-3 py-2 rounded-md bg-accent/10 text-accent hover:bg-accent/20 transition-colors disabled:opacity-50"
+        >
+          {isSaving ? 'Opening…' : 'Open incident'}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="text-xs px-3 py-2 rounded-md border border-border text-muted hover:text-white transition-colors"
+        >
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
 export default function Alerts() {
+  const role = useAuthStore((store) => store.user?.role);
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
+  const [isCreating, setIsCreating] = React.useState(false);
   const [showResolved, setShowResolved] = React.useState(false);
 
   const query = showResolved ? '/incidents' : '/incidents?isOpen=true';
@@ -218,15 +389,29 @@ export default function Alerts() {
     <div className="space-y-6 animate-in fade-in duration-500">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <h1 className="text-2xl font-bold tracking-tight text-white">Incidents</h1>
-        <label className="flex items-center gap-2 text-xs text-muted cursor-pointer">
-          <input
-            type="checkbox"
-            checked={showResolved}
-            onChange={(event) => setShowResolved(event.target.checked)}
-            className="w-4 h-4 rounded border-border bg-surface text-accent focus:ring-accent"
-          />
-          Include resolved
-        </label>
+
+        <div className="flex items-center gap-4">
+          {/* The server enforces this too; hiding it from a VIEWER avoids
+              offering a control whose every request would be rejected. */}
+          {canMutate(role) && (
+            <button
+              onClick={() => setIsCreating(true)}
+              className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md bg-accent/10 text-accent hover:bg-accent/20 transition-colors"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              Open an incident
+            </button>
+          )}
+          <label className="flex items-center gap-2 text-xs text-muted cursor-pointer">
+            <input
+              type="checkbox"
+              checked={showResolved}
+              onChange={(event) => setShowResolved(event.target.checked)}
+              className="w-4 h-4 rounded border-border bg-surface text-accent focus:ring-accent"
+            />
+            Include resolved
+          </label>
+        </div>
       </div>
 
       <Card className="w-full border-border/50 bg-surface/30 backdrop-blur-xl">
@@ -335,6 +520,16 @@ export default function Alerts() {
         title="Incident detail"
       >
         {selectedId && <IncidentDetail incidentId={selectedId} onChanged={refresh} />}
+      </Drawer>
+
+      <Drawer isOpen={isCreating} onClose={() => setIsCreating(false)} title="Open an incident">
+        <NewIncidentForm
+          onCreated={() => {
+            setIsCreating(false);
+            refresh();
+          }}
+          onCancel={() => setIsCreating(false)}
+        />
       </Drawer>
     </div>
   );
