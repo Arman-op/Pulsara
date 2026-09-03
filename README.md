@@ -104,11 +104,22 @@ Sign in with the `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` you configured.
 ## Google sign-in (optional)
 
 Google sign-in is off unless configured, and the button is not rendered when it
-is off. To enable it, create a Firebase project and supply **all** of the
-following — a partial configuration is rejected at startup rather than silently
+is off. A partial configuration is rejected at startup rather than silently
 disabling the feature.
 
-In `backend/.env`, from *Project settings → Service accounts*:
+**1. Create the project and turn the provider on.** At
+<https://console.firebase.google.com>, create a project, then under
+*Build → Authentication → Sign-in method* enable **Google**.
+
+**2. Authorise the origin the client is served from.** Under
+*Authentication → Settings → Authorized domains*, add the host — `localhost` is
+there by default, so local development needs nothing; a deployed client does.
+Without it the popup opens and closes with `auth/unauthorized-domain`.
+
+**3. Supply all of the following.**
+
+In `backend/.env`, from *Project settings → Service accounts →
+Generate new private key* (the private key is shown once):
 
 ```
 FIREBASE_PROJECT_ID=
@@ -127,9 +138,16 @@ VITE_FIREBASE_MESSAGING_SENDER_ID=
 VITE_FIREBASE_STORAGE_BUCKET=
 ```
 
+The backend rejects a token whose email address the provider has not verified,
+because an unverified address may belong to somebody else entirely and linking
+it would let an attacker take over an existing account by claiming its email at
+the identity provider.
+
 The first account to exist in a deployment becomes `ADMIN`. Everyone after that
 starts as `VIEWER` and must be promoted deliberately by an administrator through
-`PATCH /api/users/:id`.
+`PATCH /api/users/:id`. Granting `ADMIN` to every federated sign-in — which the
+original implementation did — turns "has a Google account" into "administers
+this deployment".
 
 An administrator cannot demote or deactivate themselves, and the last active
 administrator cannot be removed — both are ways to end up locked out of your own
@@ -410,6 +428,25 @@ with `TEST_REDIS_URL`.
 
 ---
 
+## Security posture
+
+| Control | How |
+| :--- | :--- |
+| Password storage | argon2id, OWASP parameters pinned explicitly |
+| Access token | 15 minutes, held in memory only, never in `localStorage` |
+| Refresh token | HttpOnly cookie scoped to `/api/auth`, rotated on every use |
+| Replay | A rotated token presented again revokes the whole family |
+| Sign out everywhere | Refuses access tokens issued before the moment of revocation |
+| Every request | Role, active flag and revocation stamp read from the account, not the token |
+| Authorisation | Role-ranked, enforced per route and covered by a generated matrix test |
+| Input | Zod on every body and query, one error envelope |
+| Webhooks | HMAC-SHA256 over raw bytes, `timingSafeEqual` |
+| Dependencies | `npm audit` in CI on production dependencies, with a justified allowlist |
+
+Run the dependency gate locally with `npm run audit` in either package.
+
+---
+
 ## Environment variables
 
 Every variable is documented in `backend/.env.example` and
@@ -485,10 +522,17 @@ collection with batched persistence, a Prometheus scrape endpoint, service
 probing with a hysteresis state machine, derived uptime and latency percentiles,
 retention, an authenticated realtime stream, alerting engines that open and
 resolve incidents from observed outages, host resource pressure and failing
-deliveries, a GitHub Actions
-integration with signed webhooks and reconciling backfill, and a web client that
-reads all of it through a single API layer with no token in `localStorage` and
-no placeholder rows.
+deliveries, a GitHub Actions integration with signed webhooks and reconciling
+backfill, a distributed probe queue and read cache on Redis, session revocation
+enforced on every request, a dependency audit gate, and a web client that reads
+all of it through a single API layer with no token in `localStorage` and no
+placeholder rows.
+
+Two paths are implemented but **have never been run against the live third
+party**: Google sign-in against a real Firebase project, and GitHub polling
+against a real repository token. Both are covered by tests that stub exactly one
+function each, so everything Pulsara itself does is exercised — but nobody has
+watched either work end to end, and this README is not going to claim otherwise.
 
 Container images, a working `docker compose` stack and GitHub Actions CI are in
 place. [ARCHITECTURE.md](./ARCHITECTURE.md) tracks the current state precisely.

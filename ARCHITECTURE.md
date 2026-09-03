@@ -228,6 +228,46 @@ digest, so response time does not reveal whether an address is registered.
 administrator; every account after that starts as `VIEWER` and must be promoted
 deliberately.
 
+### A token is checked against the account on every request
+
+An access token is a snapshot of who somebody was when it was issued. That is
+what makes it cheap to verify, and it is also the whole problem: between issuing
+and expiry the account can be demoted, deactivated, or have every session
+deliberately revoked, and a token that is merely well-signed knows none of it.
+
+`protect` therefore reads three facts about the account on every authenticated
+request — role, active flag, and the moment sessions were last revoked — and
+uses them instead of the token's claims. The cost is one primary-key lookup,
+served from Redis where it is configured and PostgreSQL where it is not, and
+invalidated explicitly by every operation that changes one of the three.
+
+This used to apply only to privileged routes. That left the guarantee uneven: a
+demoted administrator was refused at `/api/users` and served everywhere else,
+and "which routes are strict" is not a distinction anybody should have to hold
+in their head.
+
+### Signing out everywhere actually signs you out
+
+Revoking refresh tokens ends a session's ability to *renew*. It does nothing to
+an access token already in somebody's hands, which stays cryptographically valid
+until it expires — so "sign out everywhere" left a stolen token working for the
+rest of its lifetime, which is exactly the window the person clicking it is
+trying to close.
+
+`User.sessionsValidFrom` closes it. Revocation stamps the moment; `protect`
+refuses any token issued before it. The same stamp is written when an account is
+deactivated and when its password changes, because if the account was
+compromised, the attacker's session is precisely what those actions are meant to
+terminate.
+
+The comparison uses a millisecond `iatMs` claim rather than JWT's own `iat`,
+which has one-second resolution. That resolution cannot distinguish a token
+issued just before a revocation from one issued just after inside the same
+second, and both ways of rounding are wrong: rounding up refuses the token
+somebody has just signed back in with, and rounding down honours the token the
+revocation was meant to kill. Tokens minted before the claim existed fall back
+to seconds, so a rollout does not sign everybody out.
+
 ### Roles are checked against the database, not the token
 
 `protect` establishes *who* the caller is from the signed token. `requireRole`
@@ -927,6 +967,24 @@ scan, which on a shared Redis would be somebody else's outage.
 
 ## 13. Observability and lifecycle
 
+### Correlation reaches the lines that matter
+
+Every request carries an id, echoed as `x-request-id` so a user can quote it,
+and returned in the body of every error.
+
+The id is also stamped on **every** log line the request produces, not only the
+two `pino-http` writes itself. The lines worth finding during an incident are
+the ones the application emits in between — a probe failing, an incident
+opening, a cache read falling through — and those are written by services and
+engines that never see a request object. Threading one through every module to
+reach them would be a worse cure than the disease, so an `AsyncLocalStorage`
+context carries it across every `await` and a pino `mixin` attaches it.
+
+Work that outlives the request that started it — a scheduled probe, a background
+sync — has no request to belong to, and its lines carry no id. That is correct
+rather than unfortunate: inventing one would imply a caller that does not
+exist.
+
 ### The system is scrapeable, not just viewable
 
 `GET /metrics` serves Prometheus text exposition. A system that can only be
@@ -1094,7 +1152,48 @@ change under review.
 
 ---
 
-## 16. Implementation status
+## 16. Dependencies and advisories
+
+`npm audit` runs in CI against **production** dependencies only, and fails on a
+high or critical advisory that nobody has justified.
+
+Both halves of that are deliberate. Run with no threshold, `npm audit` fails on
+everything — advisories in build tooling that never ships, transitive ones with
+no upstream fix — and a team turns it off within a week. Run at
+`--audit-level=critical` it passes silently through exactly the findings
+somebody should look at. Development dependencies are excluded because they are
+not in the image; a vulnerability in a test runner is worth knowing about and is
+not the same risk as one in the code serving requests.
+
+The middle position is `scripts/audit-allowlist.json`, where excusing a finding
+costs something: each entry states the path that reaches the code, why it is not
+reachable here, what the fix would cost, and a date by which somebody looks
+again. An expired entry fails the build exactly as an unreviewed advisory does,
+so an allowlist cannot quietly become permanent.
+
+Two entries stand today, both unreachable:
+
+- **deepmerge-ts**, reached through Prisma's config loader, which merges
+  `prisma.config.ts` — a file in this repository. The input is never
+  attacker-controlled and the loader does not run on a request path. The fix
+  needs a major that `@prisma/config` has not taken.
+- **uuid**, reached through the Firestore and Cloud Storage clients inside
+  `firebase-admin`. Pulsara uses exactly one function from that package,
+  `verifyIdToken`; those clients are never constructed, and the advisory
+  additionally requires a `buf` argument nothing here passes.
+
+Everything else `npm audit` reported was fixed by upgrading in place — including
+high-severity denial-of-service advisories in `ws` and `socket.io-parser`, which
+*are* on the request path, and a set in `react-router`.
+
+Dependabot proposes updates weekly, grouping patch and minor into one pull
+request per package so CI runs once and a reviewer reads one diff. Majors stay
+separate, because each is a decision — the two advisories above are exactly the
+kind of call a person should make rather than a bot.
+
+---
+
+## 17. Implementation status
 
 | Area | State |
 | :--- | :--- |
@@ -1110,9 +1209,23 @@ change under review.
 | Incident/alerting engine | Implemented |
 | GitHub Actions integration | Implemented |
 | Web client on the real API | Implemented |
+| Prometheus exposition | Implemented |
+| Distributed probe queue and read cache | Implemented |
+| Session revocation enforced on every request | Implemented |
+| Dependency audit gate | Implemented |
 | Automated tests | Implemented |
 | Container images and CI | Implemented |
+| Google sign-in verified against a live Firebase project | **Not verified** |
+| GitHub polling verified against a live repository | **Not verified** |
 
 Deployments and incidents stay empty until their sources exist. Those views show
 empty states rather than placeholder rows, because an empty list is the truth
 about a system with no CI integration configured.
+
+The last two rows are the honest ones. Both paths are implemented and covered by
+tests that stub exactly one function each — Firebase's token verification and
+GitHub's HTTP client — so everything the application itself does is exercised.
+Neither has been run against a real Firebase project or a real GitHub token,
+because this repository has no credentials for either, and saying "works" of
+something nobody has watched work would be the same species of claim this
+project was built to remove.
