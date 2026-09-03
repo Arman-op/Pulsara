@@ -640,7 +640,48 @@ a working system with nothing to report rather than as a broken one.
 
 ---
 
-## 13. Implementation status
+## 13. Testing
+
+The suite is split by what it needs, not by what it covers.
+
+`backend/tests/unit` exercises pure decision logic — the hysteresis state
+machine, the GitHub status mapping, signature verification, token issuance,
+password hashing. It needs nothing but Node and finishes in under a second, so
+it is the fast loop and the first CI job.
+
+`backend/tests/integration` drives the real Express app over HTTP against a real
+PostgreSQL database. There is no mocked Prisma client anywhere, on purpose:
+every guarantee in this system that is worth testing lives in the database. The
+partial unique index that deduplicates incidents, the serializable transaction
+that stops the last administrator being removed, the compare-and-swap that makes
+refresh-token rotation safe under concurrency — a mocked client would assert
+that the code calls the functions it calls, and would pass just as happily with
+all three of those removed. Migrations are applied with `migrate deploy`, the
+same command production runs, so a migration that only works when generated from
+a live schema fails here rather than during a release.
+
+Each case starts from an empty database. Sharing fixtures between cases produces
+suites where one failure cascades into unrelated ones and where test order
+quietly becomes part of the contract. The truncation that makes that possible is
+also why the suite refuses to run against a database whose name does not end in
+`_test`.
+
+The tests define their own environment rather than inheriting `.env`. Vitest
+loads `.env` into `process.env` before setup files run, so without this a
+developer whose local CORS origin or rate limit differed would see assertions
+fail for reasons unrelated to their change.
+
+On the client, `src/shared/api/client.test.ts` is the one that earns its place
+most clearly: it pins single-flight refresh, replay-exactly-once, and the rule
+that a failed refresh — and only a failed refresh — ends the session. Getting
+that wrong does not look like a bug, it looks like "the app randomly logs me
+out". The component tests assert the product's central honesty rule: that an
+unmeasured value renders as an em dash, and that a failed request renders as an
+error rather than as a healthy fleet.
+
+---
+
+## 14. Implementation status
 
 | Area | State |
 | :--- | :--- |
@@ -656,7 +697,7 @@ a working system with nothing to report rather than as a broken one.
 | Incident/alerting engine | Implemented |
 | GitHub Actions integration | Implemented |
 | Web client on the real API | Implemented |
-| Automated tests | **Not yet implemented** |
+| Automated tests | Implemented |
 | Container images and CI | **Not yet implemented** |
 
 Deployments and incidents stay empty until their sources exist. Those views show

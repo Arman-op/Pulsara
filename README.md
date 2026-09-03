@@ -189,6 +189,9 @@ optimisation rather than a requirement.
 | `npm run typecheck` | Type-check without emitting |
 | `npm run lint` | Type-aware ESLint |
 | `npm run format` | Prettier |
+| `npm test` | Unit and integration suites |
+| `npm run test:unit` | Pure logic only; needs no database |
+| `npm run test:integration` | Real HTTP against a real PostgreSQL |
 | `npm run db:migrate` | Create/apply a migration in development |
 | `npm run db:deploy` | Apply pending migrations (production) |
 | `npm run db:seed` | First admin + service catalogue |
@@ -204,6 +207,29 @@ optimisation rather than a requirement.
 | `npm run typecheck` | Type-check |
 | `npm run lint` | ESLint |
 | `npm run format` | Prettier |
+| `npm test` | Vitest with jsdom and Testing Library |
+
+---
+
+## Tests
+
+```bash
+cd backend  && npm run test:unit         # no database required
+docker compose up -d postgres            # for the integration suite
+cd backend  && npm test
+cd frontend && npm test
+```
+
+The backend integration suite runs against a real PostgreSQL database rather
+than a mocked Prisma client, because every guarantee worth testing here lives in
+the database: the partial unique index that deduplicates incidents, the
+serializable transaction that stops the last administrator being removed, the
+compare-and-swap that makes refresh-token rotation safe. A mocked client would
+pass just as happily with all three removed.
+
+It creates and migrates a `pulsara_test` database on first run, and refuses to
+run against any database whose name does not end in `_test` — it truncates every
+table between cases. Override the target with `TEST_DATABASE_URL`.
 
 ---
 
@@ -282,7 +308,7 @@ integration with signed webhooks and reconciling backfill, and a web client that
 reads all of it through a single API layer with no token in `localStorage` and
 no placeholder rows.
 
-Not yet implemented: automated tests, and container images with CI.
+Not yet implemented: container images and CI.
 [ARCHITECTURE.md](./ARCHITECTURE.md) tracks the current state precisely.
 
 ---
