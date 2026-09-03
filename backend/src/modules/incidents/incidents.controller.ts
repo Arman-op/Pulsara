@@ -1,6 +1,13 @@
-import { IncidentEventKind, IncidentSource, IncidentStatus, type Prisma } from '@prisma/client';
+import {
+  AuditAction,
+  IncidentEventKind,
+  IncidentSource,
+  IncidentStatus,
+  type Prisma,
+} from '@prisma/client';
 import type { Request, Response } from 'express';
 import { prisma } from '../../db/prisma';
+import { recordAuditIn } from '../../lib/audit';
 import { BadRequestError, NotFoundError } from '../../lib/errors';
 import { pageMeta, sendSuccess } from '../../lib/http';
 import { parseBody, parseParams, parseQuery, uuidParamSchema } from '../../lib/validation';
@@ -107,6 +114,25 @@ export async function createIncident(req: Request, res: Response): Promise<void>
       },
     });
 
+    /**
+     * The timeline and the audit trail answer different questions and have
+     * different audiences. The timeline is the narrative of one incident, shown
+     * to anybody who can see it and including everything the machines did. The
+     * audit trail is administrator-only, queryable by actor across the whole
+     * system, and records only what a person chose to do. Neither substitutes
+     * for the other, which is why this writes both.
+     */
+    await recordAuditIn(tx, req, actor.id, {
+      action: AuditAction.INCIDENT_CREATED,
+      resource: 'incident',
+      resourceId: created.id,
+      metadata: {
+        title: created.title,
+        severity: created.severity,
+        serviceId: created.serviceId,
+      },
+    });
+
     return created;
   });
 
@@ -137,6 +163,15 @@ export async function updateIncident(req: Request, res: Response): Promise<void>
   const push = (kind: IncidentEventKind, message: string) =>
     events.push({ incidentId: id, kind, message, actorId: actor.id });
 
+  /**
+   * One audit row per state transition, carrying the before and after values.
+   * "Somebody edited this incident" is not accountability; "this person moved
+   * it from CRITICAL to LOW at 03:14" is.
+   */
+  const audits: { action: AuditAction; metadata: Prisma.InputJsonValue }[] = [];
+  const audit = (action: AuditAction, metadata: Prisma.InputJsonValue) =>
+    audits.push({ action, metadata });
+
   if (input.status && input.status !== existing.status) {
     push(
       input.status === IncidentStatus.RESOLVED
@@ -146,6 +181,7 @@ export async function updateIncident(req: Request, res: Response): Promise<void>
           : IncidentEventKind.STATUS_CHANGED,
       `${actor.name} changed status from ${existing.status} to ${input.status}`,
     );
+    audit(AuditAction.INCIDENT_STATUS_CHANGED, { from: existing.status, to: input.status });
   }
 
   if (input.severity && input.severity !== existing.severity) {
@@ -153,6 +189,10 @@ export async function updateIncident(req: Request, res: Response): Promise<void>
       IncidentEventKind.SEVERITY_CHANGED,
       `${actor.name} changed severity from ${existing.severity} to ${input.severity}`,
     );
+    audit(AuditAction.INCIDENT_SEVERITY_CHANGED, {
+      from: existing.severity,
+      to: input.severity,
+    });
   }
 
   if (input.assigneeId !== undefined && input.assigneeId !== existing.assigneeId) {
@@ -162,6 +202,10 @@ export async function updateIncident(req: Request, res: Response): Promise<void>
         ? `${actor.name} assigned this incident`
         : `${actor.name} removed the assignee`,
     );
+    audit(AuditAction.INCIDENT_ASSIGNED, {
+      from: existing.assigneeId,
+      to: input.assigneeId,
+    });
   }
 
   /**
@@ -188,6 +232,15 @@ export async function updateIncident(req: Request, res: Response): Promise<void>
 
     if (events.length > 0) {
       await tx.incidentEvent.createMany({ data: events });
+    }
+
+    for (const entry of audits) {
+      await recordAuditIn(tx, req, actor.id, {
+        action: entry.action,
+        resource: 'incident',
+        resourceId: id,
+        metadata: entry.metadata,
+      });
     }
 
     return updated;

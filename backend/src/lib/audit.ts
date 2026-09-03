@@ -39,6 +39,35 @@ export type AuditEntry = {
  * choice — refusing the action when it cannot be audited — is the right one in
  * regulated environments, and this is the line to change.
  */
+/**
+ * Records an action inside a caller's transaction.
+ *
+ * The opposite trade-off to `recordAudit` below, and appropriate where the
+ * caller is already writing atomically for its own reasons. Incident mutations
+ * are the case in point: the timeline entry and the state change must commit
+ * together or the timeline stops being a reliable account, and once that
+ * transaction exists the audit row rides along in it for free — with the
+ * stronger guarantee that an audited action either happened and was recorded,
+ * or did neither.
+ */
+export async function recordAuditIn(
+  tx: Prisma.TransactionClient,
+  req: Request,
+  actorId: string,
+  entry: AuditEntry,
+): Promise<void> {
+  await tx.auditLog.create({
+    data: {
+      action: entry.action,
+      resource: entry.resource,
+      resourceId: entry.resourceId ?? null,
+      metadata: entry.metadata ?? undefined,
+      userId: actorId,
+      ipAddress: req.ip ?? null,
+    },
+  });
+}
+
 export function recordAudit(req: Request, actorId: string, entry: AuditEntry): void {
   void prisma.auditLog
     .create({
