@@ -1,6 +1,7 @@
 import { env } from '../../config/env';
 import { UpstreamUnavailableError } from '../../lib/errors';
 import { logger } from '../../lib/logger';
+import { githubAuthorization } from './github.auth';
 
 /**
  * Minimal GitHub REST client.
@@ -62,20 +63,22 @@ export type ConditionalResult<T> =
   | { notModified: true }
   | { notModified: false; data: T; etag: string | null };
 
-function authHeaders(): Record<string, string> {
-  if (!env.GITHUB_TOKEN) {
-    throw new UpstreamUnavailableError('GitHub integration is not configured');
-  }
+/**
+ * Async because a GitHub App renews its installation token on a network round
+ * trip. Every call site awaits the header rather than branching on which
+ * credential the deployment is configured with.
+ */
+async function authHeaders(): Promise<Record<string, string>> {
   return {
     accept: 'application/vnd.github+json',
-    authorization: `Bearer ${env.GITHUB_TOKEN}`,
+    authorization: await githubAuthorization(),
     'x-github-api-version': API_VERSION,
     'user-agent': 'Pulsara',
   };
 }
 
 async function request(path: string, etag?: string | null): Promise<Response> {
-  const headers = new Headers(authHeaders());
+  const headers = new Headers(await authHeaders());
   if (etag) headers.set('if-none-match', etag);
 
   let response: Response;

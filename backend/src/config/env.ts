@@ -219,6 +219,58 @@ const envSchema = z.object({
   GITHUB_TOKEN: z.string().min(1).optional(),
 
   /**
+   * GitHub App credentials, the production-grade alternative to a token.
+   *
+   * All three move together, like the Firebase set: a partial configuration is
+   * a mistake, and treating it as "disabled" would hide a broken deployment
+   * behind a working-looking one.
+   */
+  GITHUB_APP_ID: z
+    .string()
+    .regex(/^[0-9]+$/, 'must be the numeric App ID')
+    .optional(),
+  /**
+   * The App's PEM private key. Secret stores and `.env` files cannot carry raw
+   * newlines, so it is supplied with literal backslash-n sequences and expanded
+   * here before the PEM is parsed — the same treatment FIREBASE_PRIVATE_KEY
+   * gets, for the same reason.
+   */
+  GITHUB_APP_PRIVATE_KEY: z
+    .string()
+    .min(1)
+    .optional()
+    .transform((value) => value?.replace(/\\n/g, '\n')),
+  /**
+   * Which installation to act as. Optional: with exactly one installation it is
+   * discovered at startup. It becomes required the moment the App is installed
+   * on a second account, because picking one arbitrarily would silently mirror
+   * the wrong organisation's pipelines.
+   */
+  GITHUB_APP_INSTALLATION_ID: z
+    .string()
+    .regex(/^[0-9]+$/, 'must be the numeric installation ID')
+    .optional(),
+
+  /**
+   * Repository mirrored automatically at startup, as `owner/name`.
+   *
+   * A deployment with this set needs no manual connection step: the repository
+   * is registered and backfilled on boot. Additional repositories can still be
+   * connected through the API.
+   *
+   * The default is this project's own repository, which makes a fresh clone
+   * show real pipelines rather than an empty page. A fork should change it —
+   * otherwise it mirrors somebody else's delivery history.
+   */
+  GITHUB_MONITORED_REPO: z
+    .string()
+    .regex(
+      /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/,
+      'must be a GitHub repository as owner/name',
+    )
+    .default('Arman-op/Pulsara'),
+
+  /**
    * Shared secret configured on the webhook. Required to accept deliveries: an
    * unauthenticated webhook endpoint lets anyone on the internet write
    * deployment records.
@@ -270,6 +322,21 @@ const validatedEnvSchema = envSchema
     path: ['HOST_ALERT_CRITICAL_PERCENT'],
     message:
       'HOST_ALERT_CRITICAL_PERCENT must be at least CPU_ALERT_THRESHOLD_PERCENT, otherwise every incident opens already critical',
+  })
+  .refine(
+    (value) => {
+      const provided = [value.GITHUB_APP_ID, value.GITHUB_APP_PRIVATE_KEY].filter(Boolean).length;
+      return provided === 0 || provided === 2;
+    },
+    {
+      path: ['GITHUB_APP_ID'],
+      message: 'A GitHub App needs GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY together, or neither',
+    },
+  )
+  .refine((value) => !(value.GITHUB_APP_ID && value.GITHUB_TOKEN), {
+    path: ['GITHUB_TOKEN'],
+    message:
+      'Configure either a GitHub App or GITHUB_TOKEN, not both: which credential is talking to GitHub would otherwise depend on code order rather than on configuration',
   })
   .refine((value) => value.JWT_ACCESS_SECRET !== value.JWT_REFRESH_SECRET, {
     path: ['JWT_REFRESH_SECRET'],
@@ -361,7 +428,23 @@ export const isTest = env.NODE_ENV === 'test';
  * without polling. Each is reported separately so the UI can say precisely
  * which half is missing.
  */
-export const isGitHubPollingConfigured = Boolean(env.GITHUB_TOKEN);
+/**
+ * How this deployment authenticates to GitHub.
+ *
+ * `app` is the production arrangement and `token` the development one; the
+ * tradeoff is set out in ARCHITECTURE.md. Everything downstream asks for the
+ * mode rather than testing individual variables, so adding a third mechanism
+ * later touches one place.
+ */
+export type GitHubAuthMode = 'app' | 'token' | 'none';
+
+export const githubAuthMode: GitHubAuthMode = env.GITHUB_APP_ID
+  ? 'app'
+  : env.GITHUB_TOKEN
+    ? 'token'
+    : 'none';
+
+export const isGitHubPollingConfigured = githubAuthMode !== 'none';
 
 /** Whether the scrape endpoint requires a bearer token. */
 export const isMetricsScrapeProtected = Boolean(env.METRICS_SCRAPE_TOKEN);
