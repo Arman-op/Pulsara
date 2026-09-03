@@ -102,7 +102,21 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
 
     await shutdownRealtimeServer(io);
     await new Promise<void>((resolve, reject) => {
-      httpServer.close((error) => (error ? reject(error) : resolve()));
+      httpServer.close((error) => {
+        /**
+         * Socket.IO closes the HTTP server it was attached to, so by the time
+         * this runs the listener is normally already down and `close` reports
+         * ERR_SERVER_NOT_RUNNING. That is the successful path. Treating it as a
+         * failure made every clean shutdown log an error and exit non-zero,
+         * which an orchestrator reads as a crash — and which would have hidden
+         * a real drain failure among the noise.
+         */
+        if (error && (error as NodeJS.ErrnoException).code !== 'ERR_SERVER_NOT_RUNNING') {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
     });
     await prisma.$disconnect();
     logger.info('Shutdown complete');
