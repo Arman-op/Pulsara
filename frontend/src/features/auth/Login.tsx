@@ -1,6 +1,10 @@
+import { signInWithPopup } from 'firebase/auth';
+import { Command } from 'lucide-react';
 import * as React from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
-import { useAuthStore } from '../../shared/store/authStore';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { env, isGoogleSignInEnabled } from '../../config/env';
+import type { ApiResponse, AuthUser } from '../../shared/api/types';
+import { Button } from '../../shared/components/Button';
 import {
   Card,
   CardContent,
@@ -8,90 +12,94 @@ import {
   CardHeader,
   CardTitle,
 } from '../../shared/components/Card';
-import { Button } from '../../shared/components/Button';
 import { Input } from '../../shared/components/Input';
-import { Command } from 'lucide-react';
+import { useAuthStore } from '../../shared/store/authStore';
 import { useToastStore } from '../../shared/store/toastStore';
-import { signInWithPopup } from 'firebase/auth';
 import { createGoogleProvider, getFirebaseAuth } from '../../shared/utils/firebase';
-import { env, isGoogleSignInEnabled } from '../../config/env';
+
+/**
+ * Sign-in.
+ *
+ * The form no longer arrives pre-filled with `admin@pulsara.dev` / `password`,
+ * because the backend that accepted those credentials from any email address is
+ * gone.
+ *
+ * Login is one of the few places that calls `fetch` directly rather than going
+ * through the API client: there is no session yet, so the client's
+ * refresh-and-retry behaviour has nothing to work with.
+ */
+
+type SessionResponse = { user: AuthUser; accessToken: string };
 
 export default function Login() {
   const [email, setEmail] = React.useState('');
   const [password, setPassword] = React.useState('');
-  const [isLoading, setIsLoading] = React.useState(false);
-  const { setAuth } = useAuthStore();
-  const { addToast } = useToastStore();
+  const [isSubmitting, setIsSubmitting] = React.useState(false);
+  const [isGoogleSubmitting, setIsGoogleSubmitting] = React.useState(false);
+
+  const setSession = useAuthStore((store) => store.setSession);
+  const addToast = useToastStore((store) => store.addToast);
   const navigate = useNavigate();
   const location = useLocation();
-  const from = location.state?.from?.pathname || '/';
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsLoading(true);
+  const redirectTo =
+    (location.state as { from?: { pathname?: string } } | null)?.from?.pathname ?? '/';
+
+  const completeSignIn = (session: SessionResponse) => {
+    setSession(session.user, session.accessToken);
+    navigate(redirectTo, { replace: true });
+  };
+
+  /**
+   * `credentials: 'include'` is essential: the refresh token comes back as a
+   * Set-Cookie, and without it the browser discards the cookie and the user is
+   * signed out again on the next reload.
+   */
+  const post = async (path: string, body: unknown): Promise<SessionResponse> => {
+    const response = await fetch(`${env.VITE_API_URL}/api${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(body),
+    });
+
+    const parsed = (await response.json()) as ApiResponse<SessionResponse>;
+    if (!parsed.success) throw new Error(parsed.error.message);
+    return parsed.data;
+  };
+
+  const submitPassword = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setIsSubmitting(true);
     try {
-      const res = await fetch(`${env.VITE_API_URL}/api/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
-      });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        setAuth(data.data.user, data.data.accessToken);
-        addToast({ type: 'success', title: 'Welcome back!', message: 'Successfully logged in.' });
-        navigate(from, { replace: true });
-      } else {
-        addToast({
-          type: 'error',
-          title: 'Login failed',
-          message: data.error || 'Invalid credentials',
-        });
-      }
-    } catch {
+      completeSignIn(await post('/auth/login', { email, password }));
+    } catch (error) {
       addToast({
         type: 'error',
-        title: 'Connection Error',
-        message: 'Could not reach auth server.',
+        title: 'Sign-in failed',
+        message: error instanceof Error ? error.message : 'Could not reach the server.',
       });
     } finally {
-      setIsLoading(false);
+      setIsSubmitting(false);
     }
   };
 
-  const handleGoogleSignIn = async () => {
-    setIsLoading(true);
+  const submitGoogle = async () => {
+    setIsGoogleSubmitting(true);
     try {
       const result = await signInWithPopup(getFirebaseAuth(), createGoogleProvider());
       const idToken = await result.user.getIdToken();
-      const res = await fetch(`${env.VITE_API_URL}/api/auth/firebase`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idToken }),
-      });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        setAuth(data.data.user, data.data.accessToken);
-        addToast({
-          type: 'success',
-          title: 'Welcome back!',
-          message: 'Successfully logged in with Google.',
-        });
-        navigate(from, { replace: true });
-      } else {
-        addToast({
-          type: 'error',
-          title: 'Login failed',
-          message: data.error || 'Authentication error',
-        });
-      }
+      completeSignIn(await post('/auth/firebase', { idToken }));
     } catch (error) {
-      // Firebase surfaces cancellations as errors too; the message is the only
-      // part worth showing, and only when it is actually a string.
-      const message =
-        error instanceof Error ? error.message : 'Google sign-in could not be completed.';
-      addToast({ type: 'error', title: 'Sign-in Error', message });
+      // Firebase reports a closed popup as an error too, so only the message is
+      // worth surfacing, and only when it is genuinely one.
+      addToast({
+        type: 'error',
+        title: 'Google sign-in failed',
+        message: error instanceof Error ? error.message : 'Could not complete sign-in.',
+      });
     } finally {
-      setIsLoading(false);
+      setIsGoogleSubmitting(false);
     }
   };
 
@@ -105,12 +113,13 @@ export default function Login() {
             <Command className="h-6 w-6 text-white" />
           </div>
           <div className="text-center space-y-1.5">
-            <CardTitle className="text-2xl">Welcome to Pulsara</CardTitle>
-            <CardDescription>Sign in to access your DevOps dashboard</CardDescription>
+            <CardTitle className="text-2xl">Sign in to Pulsara</CardTitle>
+            <CardDescription>Infrastructure intelligence for your team</CardDescription>
           </div>
         </CardHeader>
+
         <CardContent>
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={submitPassword} className="space-y-4">
             <div className="space-y-2">
               <label className="text-sm font-medium text-white" htmlFor="email">
                 Email
@@ -118,40 +127,41 @@ export default function Login() {
               <Input
                 id="email"
                 type="email"
+                autoComplete="username"
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                onChange={(event) => setEmail(event.target.value)}
                 placeholder="you@example.com"
                 required
               />
             </div>
+
             <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <label className="text-sm font-medium text-white" htmlFor="password">
-                  Password
-                </label>
-              </div>
+              <label className="text-sm font-medium text-white" htmlFor="password">
+                Password
+              </label>
               <Input
                 id="password"
                 type="password"
+                autoComplete="current-password"
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                onChange={(event) => setPassword(event.target.value)}
                 placeholder="••••••••"
                 required
               />
             </div>
-            <Button type="submit" className="w-full mt-6" isLoading={isLoading}>
-              Sign In
+
+            <Button type="submit" className="w-full mt-6" isLoading={isSubmitting}>
+              Sign in
             </Button>
           </form>
 
-          {/* Rendered only when the deployment is configured for Google
-              sign-in; offering a control that is guaranteed to fail is
-              worse than not offering it. */}
+          {/* Rendered only when the deployment is configured for Google sign-in;
+              a button guaranteed to fail is worse than no button. */}
           {isGoogleSignInEnabled && (
             <>
               <div className="relative my-6">
                 <div className="absolute inset-0 flex items-center">
-                  <div className="w-full border-t border-border/50"></div>
+                  <div className="w-full border-t border-border/50" />
                 </div>
                 <div className="relative flex justify-center text-xs uppercase">
                   <span className="bg-surface px-2 text-muted">Or continue with</span>
@@ -159,12 +169,12 @@ export default function Login() {
               </div>
 
               <Button
-                onClick={handleGoogleSignIn}
+                onClick={submitGoogle}
                 className="w-full flex items-center justify-center space-x-2 bg-white text-black hover:bg-gray-100 transition-colors"
-                isLoading={isLoading}
+                isLoading={isGoogleSubmitting}
               >
-                {!isLoading && (
-                  <svg className="w-5 h-5 mr-2 shrink-0" viewBox="0 0 24 24">
+                {!isGoogleSubmitting && (
+                  <svg className="w-5 h-5 mr-2 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
                     <path
                       d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
                       fill="#4285F4"
@@ -187,10 +197,6 @@ export default function Login() {
               </Button>
             </>
           )}
-
-          <p className="text-center text-xs text-muted mt-6">
-            Protected by SSO. Contact IT for access issues.
-          </p>
         </CardContent>
       </Card>
     </div>

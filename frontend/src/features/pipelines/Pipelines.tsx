@@ -1,8 +1,7 @@
 import { formatDistanceToNow } from 'date-fns';
 import { AlertTriangle, ExternalLink, GitBranch, Loader2 } from 'lucide-react';
-import * as React from 'react';
-import { env } from '../../config/env';
-import type { ApiResponse, Deployment, DeploymentListMeta } from '../../shared/api/types';
+import type { Deployment, DeploymentListMeta } from '../../shared/api/types';
+import { useApi } from '../../shared/api/useApi';
 import { Badge } from '../../shared/components/Badge';
 import { Card, CardContent, CardHeader, CardTitle } from '../../shared/components/Card';
 import {
@@ -13,8 +12,6 @@ import {
   TableHeader,
   TableRow,
 } from '../../shared/components/Table';
-import { useAuthStore } from '../../shared/store/authStore';
-
 /**
  * CI/CD pipeline history.
  *
@@ -50,46 +47,18 @@ function statusVariant(status: Deployment['status']) {
 
 const SHORT_SHA_LENGTH = 7;
 
+/** Runs change while you watch them, so the list refreshes on its own. */
+const POLL_MS = 20_000;
+
 export default function Pipelines() {
-  const [deployments, setDeployments] = React.useState<Deployment[]>([]);
-  const [meta, setMeta] = React.useState<DeploymentListMeta | null>(null);
-  const [isLoading, setIsLoading] = React.useState(true);
-  const [loadError, setLoadError] = React.useState<string | null>(null);
-  const accessToken = useAuthStore((store) => store.accessToken);
+  const { data, meta, isLoading, error } = useApi<Deployment[], DeploymentListMeta>(
+    '/deployments',
+    { pollMs: POLL_MS },
+  );
 
-  React.useEffect(() => {
-    if (!accessToken) return;
-    let cancelled = false;
+  const deployments = data ?? [];
 
-    const load = async () => {
-      try {
-        const res = await fetch(`${env.VITE_API_URL}/api/deployments`, {
-          headers: { Authorization: `Bearer ${accessToken}` },
-        });
-        const body = (await res.json()) as ApiResponse<Deployment[]>;
-        if (cancelled) return;
-
-        if (body.success) {
-          setDeployments(body.data);
-          setMeta((body.meta as unknown as DeploymentListMeta) ?? null);
-          setLoadError(null);
-        } else {
-          setLoadError(body.error.message);
-        }
-      } catch {
-        if (!cancelled) setLoadError('Deployment history could not be reached.');
-      } finally {
-        if (!cancelled) setIsLoading(false);
-      }
-    };
-
-    void load();
-    return () => {
-      cancelled = true;
-    };
-  }, [accessToken]);
-
-  const notConnected = meta !== null && meta.connectedRepositories === 0;
+  const notConnected = meta !== undefined && meta.connectedRepositories === 0;
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
@@ -114,9 +83,9 @@ export default function Pipelines() {
             <div className="p-8 flex justify-center text-accent">
               <Loader2 className="w-8 h-8 animate-spin" />
             </div>
-          ) : loadError ? (
+          ) : error ? (
             <div className="p-8 text-center text-danger" role="alert">
-              {loadError}
+              {error}
             </div>
           ) : deployments.length === 0 ? (
             /* The two empty cases are described differently on purpose. */
