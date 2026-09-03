@@ -27,7 +27,8 @@ For the design rationale behind every decision below, see
 ## Prerequisites
 
 - **Node.js 22+**
-- **Docker** (for PostgreSQL), or an existing PostgreSQL 14+ instance
+- **Docker** (for PostgreSQL, and for running the stack in containers), or an
+  existing PostgreSQL 14+ instance
 
 ---
 
@@ -36,13 +37,12 @@ For the design rationale behind every decision below, see
 ### 1. Start PostgreSQL
 
 ```bash
-docker run -d --name pulsara-postgres-dev \
-  -e POSTGRES_USER=pulsara \
-  -e POSTGRES_PASSWORD=pulsara_local_dev \
-  -e POSTGRES_DB=pulsara \
-  -p 5433:5432 \
-  postgres:16-alpine
+docker compose up -d
 ```
+
+This brings up only the database, which is what you need while running the API
+and the client from source. Port 5433 is used deliberately, so it does not clash
+with a native PostgreSQL on 5432.
 
 ### 2. Configure and start the API
 
@@ -177,6 +177,49 @@ optimisation rather than a requirement.
 
 ---
 
+## Running it in containers
+
+The whole stack, built from source and served the way it would be deployed:
+
+```bash
+cp backend/.env.example backend/.env      # then fill in the secrets
+docker compose --profile app up --build
+```
+
+The client is on <http://localhost:5174> and the API on
+<http://localhost:4000>, the same ports the dev servers use, so `CORS_ORIGINS`
+does not have to change between the two ways of running it.
+
+Both images are multi-stage: the toolchain and the source stay in the build
+stage, the API runs as the unprivileged `node` user, the client is served by
+unprivileged nginx on 8080, and both declare a `HEALTHCHECK`. The API's checks
+liveness rather than readiness, because a database blip must not make an
+orchestrator restart every replica during a failover.
+
+The client's API origin is a **build argument**, not a runtime variable: Vite
+inlines `VITE_*` values into the bundle, so an image is built for one
+deployment and cannot be repointed at another by changing an environment
+variable.
+
+---
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request:
+
+| Job | What it does |
+| :--- | :--- |
+| API | Prettier, ESLint, `tsc`, unit tests, integration tests against a real PostgreSQL service container, build |
+| Web | Prettier, ESLint, `tsc`, Vitest, production build |
+| Images | Builds both images; pushes them to GHCR only from `main` |
+
+Images are built on every run so a broken Dockerfile fails the pull request that
+caused it, but published only from the default branch — a fork's pull request
+must never be able to publish a tag a deployment might pull. Set the repository
+variable `VITE_API_URL` to the origin the published client should talk to.
+
+---
+
 ## Scripts
 
 ### `backend/`
@@ -308,8 +351,8 @@ integration with signed webhooks and reconciling backfill, and a web client that
 reads all of it through a single API layer with no token in `localStorage` and
 no placeholder rows.
 
-Not yet implemented: container images and CI.
-[ARCHITECTURE.md](./ARCHITECTURE.md) tracks the current state precisely.
+Container images, a working `docker compose` stack and GitHub Actions CI are in
+place. [ARCHITECTURE.md](./ARCHITECTURE.md) tracks the current state precisely.
 
 ---
 

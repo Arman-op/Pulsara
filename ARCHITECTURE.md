@@ -123,6 +123,12 @@ frontend/
       users/               Administration (ADMIN only)
       settings/            Profile, security, sessions, integrations
       notfound/            404 inside the app shell
+
+.github/workflows/ci.yml  Format, lint, typecheck, test, build, publish
+backend/Dockerfile        Multi-stage; runs as the unprivileged `node` user
+frontend/Dockerfile       Multi-stage; nginx-unprivileged on 8080
+frontend/nginx.conf       SPA fallback and asset cache policy
+docker-compose.yml        PostgreSQL by default; the stack behind `--profile app`
 ```
 
 Modules are grouped by **domain**, not by technical layer. A change to how
@@ -681,7 +687,74 @@ error rather than as a healthy fleet.
 
 ---
 
-## 14. Implementation status
+## 14. Packaging and delivery
+
+### Images
+
+Both images are multi-stage, so what ships contains neither the toolchain nor
+the source. Every tool left in a production image is a tool an attacker who
+lands inside it inherits.
+
+The base is Debian slim rather than Alpine. Prisma's query engine and the argon2
+native module both link against OpenSSL, and musl builds of those are the usual
+source of an image that builds cleanly and then fails to start. Relatedly, the
+build stage installs the `openssl` binary even though nothing in the build calls
+it: Prisma selects its query engine by *detecting* the OpenSSL version at
+generation time, and on a slim image with no openssl present that detection
+silently falls back to a 1.1 engine which cannot start on the 3.0 runtime. That
+failure appears only when the container is run, never when it is built, so it is
+exactly the kind that reaches a registry.
+
+The API runs as the unprivileged `node` user and the client is served by
+unprivileged nginx on port 8080. Both declare a `HEALTHCHECK`, and the API's
+targets liveness rather than readiness — readiness touches the database, and a
+failover blip must not make the orchestrator restart every replica at once.
+
+`.dockerignore` excludes `.env` in both packages. Without that line a local
+secrets file is copied into a layer, where it survives every later deletion and
+travels with the image to anyone who can pull it. On the client it would be
+worse still: Vite would inline the values into JavaScript served to every
+visitor.
+
+### The client's API origin is a build argument
+
+Vite inlines `VITE_*` at build time, so `VITE_API_URL` is a `--build-arg`, not a
+runtime environment variable. An image built for staging therefore cannot be
+repointed at production by changing an env var. That is a constraint, and it is
+the honest one: pretending otherwise is how a client ends up talking to the
+wrong API.
+
+### Compose
+
+`docker compose up -d` starts only PostgreSQL, because that is what a developer
+running `npm run dev` needs, and because the default path must not fail on a
+clean checkout. The application containers sit behind an `app` profile and read
+`backend/.env`, which is not in the repository.
+
+There is no Redis service. Nothing in the system uses one: rate limiting is
+in-process, the realtime transport is a single Socket.IO server, and every
+derived figure is computed in PostgreSQL on read. A cache with nothing to cache
+is infrastructure to maintain and nothing to show for it; it goes in when there
+is a measurement that says it should.
+
+### CI
+
+Three jobs. API and Web each run format, lint, typecheck, tests and build, in
+that order — cheapest first, so an obvious failure is reported in seconds rather
+than after a database has been migrated. The API job runs its integration suite
+against a PostgreSQL service container, with a health-command so the first
+migration does not race the database's own start-up.
+
+The image job builds both images on every run, so a broken Dockerfile fails the
+pull request that caused it, and pushes to GHCR only from the default branch. A
+pull request from a fork has a read-only token; it must not be able to publish a
+tag that a deployment might pull, and it does not even attempt the registry
+login, because a failure there would fail the job for a reason unrelated to the
+change under review.
+
+---
+
+## 15. Implementation status
 
 | Area | State |
 | :--- | :--- |
@@ -698,7 +771,7 @@ error rather than as a healthy fleet.
 | GitHub Actions integration | Implemented |
 | Web client on the real API | Implemented |
 | Automated tests | Implemented |
-| Container images and CI | **Not yet implemented** |
+| Container images and CI | Implemented |
 
 Deployments and incidents stay empty until their sources exist. Those views show
 empty states rather than placeholder rows, because an empty list is the truth
