@@ -1,5 +1,5 @@
 import react from '@vitejs/plugin-react';
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vitest/config';
 
 /**
  * Vite configuration.
@@ -20,6 +20,26 @@ export default defineConfig({
     strictPort: true,
     host: true,
   },
+  /**
+   * Tests run in jsdom because every unit worth writing here involves rendering
+   * or the browser's own `fetch`. `VITE_API_URL` is supplied explicitly rather
+   * than read from a developer's `.env`: the client throws at import if it is
+   * missing, and an assertion should never depend on a file that is not in the
+   * repository.
+   */
+  test: {
+    environment: 'jsdom',
+    globals: false,
+    setupFiles: ['src/test/setup.ts'],
+    include: ['src/**/*.test.{ts,tsx}'],
+    env: { VITE_API_URL: 'http://api.test' },
+    coverage: {
+      provider: 'v8',
+      include: ['src/**/*.{ts,tsx}'],
+      exclude: ['src/main.tsx', 'src/**/*.test.{ts,tsx}', 'src/test/**'],
+    },
+  },
+
   build: {
     // Source maps are uploaded to the error tracker and are what make a
     // minified production stack trace readable.
