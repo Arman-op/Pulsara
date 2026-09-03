@@ -137,6 +137,44 @@ const envSchema = z.object({
   PROBE_RESULT_RETENTION_DAYS: int(1, 365).default(30),
   RETENTION_SWEEP_INTERVAL_MS: int(60_000, 24 * 60 * 60 * 1000).default(3_600_000),
 
+  // --- Redis (optional) ----------------------------------------------------
+
+  /**
+   * Enables the shared probe queue and the read cache.
+   *
+   * Optional on purpose. Without it the system is complete: probes run on an
+   * in-process timer and reads go straight to PostgreSQL. Requiring a broker to
+   * run the application locally is a cost paid by everyone who clones the
+   * repository, and both things Redis buys here are improvements on a working
+   * baseline rather than prerequisites for one.
+   */
+  REDIS_URL: z
+    .string()
+    .refine((value) => value.startsWith('redis://') || value.startsWith('rediss://'), {
+      message: 'must be a redis:// or rediss:// URL',
+    })
+    .optional(),
+
+  /**
+   * Namespace for every key this deployment writes, so a shared Redis can host
+   * more than one environment without either flushing the other's data.
+   */
+  REDIS_KEY_PREFIX: z.string().min(1).max(60).default('pulsara'),
+
+  /**
+   * How long a cached read stays fresh.
+   *
+   * Short, because these endpoints describe a system's current state and the
+   * whole product rests on not showing a number nobody measured recently. It is
+   * a shock absorber for repeated polling, not a data store: writes invalidate
+   * the affected keys immediately, so the TTL only ever bounds staleness that
+   * nothing has told us about.
+   */
+  CACHE_TTL_SECONDS: int(1, 300).default(10),
+
+  /** Enables the read cache independently of the queue. */
+  CACHE_ENABLED: bool(true),
+
   /** Enables the service reachability scheduler. */
   PROBES_ENABLED: bool(true),
   /**
@@ -459,6 +497,21 @@ export const githubAuthMode: GitHubAuthMode = env.GITHUB_APP_ID
     : 'none';
 
 export const isGitHubPollingConfigured = githubAuthMode !== 'none';
+
+/** Whether a Redis connection is available for the queue and the cache. */
+export const isRedisConfigured = Boolean(env.REDIS_URL);
+
+/**
+ * Whether probes are distributed through the shared queue.
+ *
+ * Without Redis the in-process timer is used instead, which is correct for a
+ * single instance and wrong for several: every replica would probe every
+ * service, multiplying load on the things being measured by the replica count
+ * and inflating the very latencies the probes exist to report.
+ */
+export const isProbeQueueEnabled = isRedisConfigured && env.PROBES_ENABLED;
+
+export const isCacheEnabled = isRedisConfigured && env.CACHE_ENABLED;
 
 /** Whether the scrape endpoint requires a bearer token. */
 export const isMetricsScrapeProtected = Boolean(env.METRICS_SCRAPE_TOKEN);
