@@ -1,58 +1,65 @@
-import { BrowserRouter, Routes, Route, Outlet } from 'react-router-dom';
-import { ProtectedRoute } from './shared/components/ProtectedRoute';
+import * as React from 'react';
+import { BrowserRouter, Navigate, Outlet, Route, Routes } from 'react-router-dom';
 import { Sidebar } from './app/Sidebar';
+import Alerts from './features/alerts/Alerts';
 import Login from './features/auth/Login';
 import Dashboard from './features/dashboard/Dashboard';
-import Pipelines from './features/pipelines/Pipelines';
 import Infrastructure from './features/infrastructure/Infrastructure';
-import Alerts from './features/alerts/Alerts';
+import NotFound from './features/notfound/NotFound';
+import Pipelines from './features/pipelines/Pipelines';
 import Settings from './features/settings/Settings';
-import { useToastStore } from './shared/store/toastStore';
-import { X } from 'lucide-react';
+import Users from './features/users/Users';
+import { bootstrapSession } from './shared/api/client';
+import { ErrorBoundary } from './shared/components/ErrorBoundary';
+import { FullPageSpinner } from './shared/components/FullPageSpinner';
+import { ProtectedRoute } from './shared/components/ProtectedRoute';
+import { ToastViewport } from './shared/components/ToastViewport';
+import { useAuthStore } from './shared/store/authStore';
 
 function AppLayout() {
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-[#0A0C10]">
+    <div className="flex h-screen w-screen overflow-hidden bg-background">
       <Sidebar />
       <main className="flex-1 overflow-y-auto p-6 lg:p-10">
-        <Outlet />
+        {/* Scoped to the content area so a failing screen does not take the
+            navigation down with it. */}
+        <ErrorBoundary>
+          <Outlet />
+        </ErrorBoundary>
       </main>
     </div>
   );
 }
 
-function ToastContainer() {
-  const { toasts, removeToast } = useToastStore();
-  return (
-    <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 w-full max-w-sm">
-      {toasts.map((t) => (
-        <div
-          key={t.id}
-          className={`p-4 rounded-xl border backdrop-blur-xl shadow-xl flex justify-between items-start transition-all duration-300 animate-in slide-in-from-bottom-5 ${
-            t.type === 'success'
-              ? 'bg-success/10 border-success/30 text-success'
-              : t.type === 'error'
-                ? 'bg-danger/10 border-danger/30 text-danger'
-                : 'bg-surface/85 border-border text-white'
-          }`}
-        >
-          <div>
-            <h4 className="font-semibold text-sm">{t.title}</h4>
-            {t.message && <p className="text-xs text-muted mt-1">{t.message}</p>}
-          </div>
-          <button
-            onClick={() => removeToast(t.id)}
-            className="ml-4 text-muted hover:text-white transition-colors"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      ))}
-    </div>
-  );
+/**
+ * Routes only an administrator may open.
+ *
+ * The server is the authority and rejects the underlying requests regardless;
+ * this exists so a VIEWER is not shown a page whose every request will fail.
+ */
+function AdminRoute() {
+  const role = useAuthStore((store) => store.user?.role);
+  return role === 'ADMIN' ? <Outlet /> : <Navigate to="/" replace />;
 }
 
 export default function App() {
+  const status = useAuthStore((store) => store.status);
+
+  /**
+   * Exchange the HttpOnly refresh cookie for an access token before rendering.
+   *
+   * This is what replaces reading a token out of `localStorage`. Until it
+   * settles the app shows a splash, so an authenticated user reloading the page
+   * is never flashed the login screen.
+   */
+  React.useEffect(() => {
+    void bootstrapSession();
+  }, []);
+
+  if (status === 'bootstrapping') {
+    return <FullPageSpinner label="Restoring your session…" />;
+  }
+
   return (
     <BrowserRouter>
       <Routes>
@@ -65,10 +72,16 @@ export default function App() {
             <Route path="/infrastructure" element={<Infrastructure />} />
             <Route path="/alerts" element={<Alerts />} />
             <Route path="/settings" element={<Settings />} />
+            <Route element={<AdminRoute />}>
+              <Route path="/users" element={<Users />} />
+            </Route>
+            {/* Catch-all inside the shell, so a mistyped URL keeps navigation. */}
+            <Route path="*" element={<NotFound />} />
           </Route>
         </Route>
       </Routes>
-      <ToastContainer />
+
+      <ToastViewport />
     </BrowserRouter>
   );
 }
