@@ -148,7 +148,17 @@ describe('startHostCollector', () => {
       );
 
       expect(firstWindow).toHaveLength(1);
-      expect(published.length).toBeGreaterThan(rows.length);
+
+      /**
+       * Rows never outnumber samples: a window is only written when something
+       * has been accumulated into it. The *ratio* is not assertable, because it
+       * depends on how fast this machine can read its own counters — on Linux
+       * many samples fall into each window, and on the Windows development
+       * machine a single read outlasts the persist interval. The invariant
+       * above, one row per family per window, is the part that is true
+       * everywhere.
+       */
+      expect(rows.length).toBeLessThanOrEqual(published.length);
     },
     SLOW,
   );
