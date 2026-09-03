@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { SHUTDOWN_GRACE_PERIOD_MS } from './config/constants';
 import {
   env,
+  githubAuthMode,
   isGitHubPollingConfigured,
   isMetricsScrapeProtected,
   isProduction,
@@ -9,7 +10,7 @@ import {
 import { app } from './app';
 import { prisma } from './db/prisma';
 import { logger } from './lib/logger';
-import { startGitHubSync } from './modules/github/github.service';
+import { ensureMonitoredRepository, startGitHubSync } from './modules/github/github.service';
 import { evaluateHostSample } from './modules/incidents/host-alert-engine';
 import { handleServiceStatusChange } from './modules/incidents/incident-engine';
 import { startHostCollector } from './modules/telemetry/host-collector';
@@ -64,6 +65,16 @@ const retentionJob = startRetentionJob();
  * service was restarting. It only runs when a token is configured, because
  * without one there is nothing it could read.
  */
+/**
+ * The monitored repository is registered before the sweep starts, so its first
+ * backfill happens on boot rather than at the first tick — the difference
+ * between a pipelines page with content and one that is empty for five minutes
+ * after a deploy.
+ */
+if (isGitHubPollingConfigured) {
+  void ensureMonitoredRepository();
+}
+
 const githubSync = env.GITHUB_SYNC_ENABLED && isGitHubPollingConfigured ? startGitHubSync() : null;
 
 if (!hostCollector) {
@@ -74,6 +85,11 @@ if (!probeScheduler) {
 }
 if (!githubSync) {
   logger.info('GitHub polling is not active; the pipelines view reports it as not connected');
+} else {
+  logger.info(
+    { mode: githubAuthMode, repository: env.GITHUB_MONITORED_REPO },
+    'GitHub integration authenticated',
+  );
 }
 if (!env.HOST_ALERTS_ENABLED) {
   logger.warn('Host threshold alerting is disabled; resource pressure will open no incidents');

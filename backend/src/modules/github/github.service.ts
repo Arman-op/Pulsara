@@ -214,6 +214,58 @@ export async function createConnection(owner: string, name: string): Promise<Rep
   });
 }
 
+/**
+ * Registers and backfills the repository named by GITHUB_MONITORED_REPO.
+ *
+ * Without this, a correctly configured deployment still shows an empty
+ * pipelines page until somebody remembers to POST a connection — which reads
+ * exactly like a broken integration. Naming the repository in configuration
+ * means the page has real content on first boot.
+ *
+ * Failure is logged and swallowed. A GitHub outage, a revoked token or a
+ * repository that has been renamed must not stop the API from starting: every
+ * other part of the product works without CI data, and the connection's
+ * `lastSyncError` is where the reason belongs.
+ */
+export async function ensureMonitoredRepository(): Promise<void> {
+  const [owner, name] = env.GITHUB_MONITORED_REPO.split('/');
+
+  // The environment schema enforces the `owner/name` shape, so both halves are
+  // present by the time this runs.
+  if (!owner || !name) return;
+
+  const existing = await prisma.repoConnection.findUnique({
+    where: { provider_owner_name: { provider: CiProvider.GITHUB, owner, name } },
+  });
+
+  /**
+   * An existing connection is left alone. Re-verifying and re-backfilling on
+   * every boot would spend rate limit re-reading runs already stored, and would
+   * quietly resurrect a repository an operator had deliberately disconnected.
+   */
+  if (existing) {
+    logger.debug(
+      { repository: env.GITHUB_MONITORED_REPO },
+      'Monitored repository already connected',
+    );
+    return;
+  }
+
+  try {
+    const connection = await createConnection(owner, name);
+    const runs = await syncConnection(connection);
+    logger.info(
+      { repository: env.GITHUB_MONITORED_REPO, runs },
+      'Connected and backfilled the monitored repository',
+    );
+  } catch (error) {
+    logger.error(
+      { err: error, repository: env.GITHUB_MONITORED_REPO },
+      'Could not connect the monitored repository; the pipelines view will report it as not connected',
+    );
+  }
+}
+
 export type GitHubSyncJob = { stop: () => void };
 
 export function startGitHubSync(): GitHubSyncJob {
