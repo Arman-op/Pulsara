@@ -1,0 +1,23 @@
+# Everything the build does not need, and everything it must never receive.
+#
+# `.env` is the important line: without it a local secrets file is copied into
+# a layer, where it survives every later deletion and travels with the image to
+# whoever can pull it.
+.env
+.env.*
+!.env.example
+
+node_modules
+dist
+coverage
+
+.git
+.gitignore
+Dockerfile
+.dockerignore
+
+# The image is built from a release, so nothing here needs the test suite.
+tests
+vitest.config.ts
+
+*.log
