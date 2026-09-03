@@ -1,10 +1,16 @@
 import { createServer } from 'node:http';
 import { SHUTDOWN_GRACE_PERIOD_MS } from './config/constants';
-import { env, isGitHubPollingConfigured } from './config/env';
+import {
+  env,
+  isGitHubPollingConfigured,
+  isMetricsScrapeProtected,
+  isProduction,
+} from './config/env';
 import { app } from './app';
 import { prisma } from './db/prisma';
 import { logger } from './lib/logger';
 import { startGitHubSync } from './modules/github/github.service';
+import { evaluateHostSample } from './modules/incidents/host-alert-engine';
 import { handleServiceStatusChange } from './modules/incidents/incident-engine';
 import { startHostCollector } from './modules/telemetry/host-collector';
 import { startProbeScheduler } from './modules/telemetry/probe-scheduler';
@@ -30,7 +36,15 @@ const publisher = createPublisher(io);
  * replica count once this is scaled out.
  */
 const hostCollector = env.METRICS_COLLECTION_ENABLED
-  ? startHostCollector((snapshot) => publisher.publish(RealtimeChannel.Metrics, snapshot))
+  ? startHostCollector((snapshot) => {
+      publisher.publish(RealtimeChannel.Metrics, snapshot);
+      /**
+       * Alerting evaluates the sample, not the persisted window. Persistence
+       * stores the mean of each window, and a mean is precisely the thing that
+       * hides the spike somebody needs to be told about.
+       */
+      void evaluateHostSample(snapshot);
+    })
   : null;
 
 const probeScheduler = env.PROBES_ENABLED
@@ -60,6 +74,14 @@ if (!probeScheduler) {
 }
 if (!githubSync) {
   logger.info('GitHub polling is not active; the pipelines view reports it as not connected');
+}
+if (!env.HOST_ALERTS_ENABLED) {
+  logger.warn('Host threshold alerting is disabled; resource pressure will open no incidents');
+}
+if (env.PROMETHEUS_METRICS_ENABLED && isProduction && !isMetricsScrapeProtected) {
+  logger.warn(
+    'The /metrics endpoint is unauthenticated; set METRICS_SCRAPE_TOKEN if the port is reachable outside the cluster',
+  );
 }
 
 httpServer.listen(env.PORT, () => {
