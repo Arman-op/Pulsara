@@ -48,6 +48,17 @@ if (!databaseName.endsWith(REQUIRED_DATABASE_SUFFIX)) {
 /** The origin the CORS assertions use. */
 export const TEST_ORIGIN = 'http://localhost:5173';
 
+/**
+ * Redis for the cache and queue suites.
+ *
+ * Matches the container in docker-compose.yml, which publishes on 6380 so it
+ * cannot collide with a Redis a developer already runs. Unlike the database
+ * this is not destructive beyond its own key prefix, so it needs no name guard —
+ * but the prefix is distinct from the development one so a stray flush cannot
+ * reach real keys.
+ */
+export const testRedisUrl = process.env.TEST_REDIS_URL ?? 'redis://localhost:6380';
+
 /** A fixed secret, so webhook signatures in the fixtures are reproducible. */
 export const TEST_WEBHOOK_SECRET = 'test_webhook_secret_0123456789abcdef';
 
@@ -83,6 +94,11 @@ const TEST_ENVIRONMENT: Record<string, string> = {
   HOST_ALERT_RECOVERY_SAMPLES: '5',
 
   PROMETHEUS_METRICS_ENABLED: 'true',
+
+  REDIS_URL: testRedisUrl,
+  REDIS_KEY_PREFIX: 'pulsara-test',
+  CACHE_ENABLED: 'true',
+  CACHE_TTL_SECONDS: '10',
 
   /** Deterministic delivery-alert thresholds. */
   DEPLOYMENT_ALERTS_ENABLED: 'true',

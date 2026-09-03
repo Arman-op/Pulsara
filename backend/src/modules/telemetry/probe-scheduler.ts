@@ -2,6 +2,7 @@ import { ServiceState, type Service } from '@prisma/client';
 import { MS_PER_SECOND } from '../../config/constants';
 import { env } from '../../config/env';
 import { prisma } from '../../db/prisma';
+import { CacheNamespace, invalidate } from '../../lib/cache';
 import { logger } from '../../lib/logger';
 import { runProbe, type ProbeOutcome } from './probe-runner';
 
@@ -76,7 +77,7 @@ export function nextStatus(
 }
 
 /** Services whose configured interval has elapsed since their last check. */
-async function findDueServices(now: Date): Promise<Service[]> {
+export async function findDueServices(now: Date): Promise<Service[]> {
   const candidates = await prisma.service.findMany({
     where: {
       isMonitored: true,
@@ -92,7 +93,7 @@ async function findDueServices(now: Date): Promise<Service[]> {
   });
 }
 
-async function checkService(service: Service): Promise<ServiceStatusChange | null> {
+export async function checkService(service: Service): Promise<ServiceStatusChange | null> {
   const outcome = await runProbe(service);
 
   const consecutiveFailures = outcome.ok ? 0 : service.consecutiveFailures + 1;
@@ -123,6 +124,22 @@ async function checkService(service: Service): Promise<ServiceStatusChange | nul
   ]);
 
   if (status === service.status) return null;
+
+  /**
+   * Invalidated on a state *transition*, not on every observation.
+   *
+   * Observing is the common case — a healthy fleet produces a result per
+   * service per interval and changes nothing — and clearing the cache each time
+   * meant it was empty within seconds of being filled. A cache with no hit rate
+   * is complexity bought with nothing.
+   *
+   * What each reading actually moves is `lastCheckedAt` and a set of aggregates
+   * windowed over twenty-four hours; letting those sit for the ten seconds of a
+   * TTL is not the kind of staleness this system cares about. Whether a service
+   * is up is the thing that must never be late, and that is exactly what a
+   * transition is.
+   */
+  await invalidate(CacheNamespace.Services);
 
   logger.info(
     { service: service.name, from: service.status, to: status, error: outcome.error },

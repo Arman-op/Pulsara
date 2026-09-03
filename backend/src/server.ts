@@ -3,18 +3,22 @@ import { SHUTDOWN_GRACE_PERIOD_MS } from './config/constants';
 import {
   env,
   githubAuthMode,
+  isCacheEnabled,
   isGitHubPollingConfigured,
   isMetricsScrapeProtected,
+  isProbeQueueEnabled,
   isProduction,
 } from './config/env';
 import { app } from './app';
 import { prisma } from './db/prisma';
+import { disconnectRedis } from './db/redis';
 import { logger } from './lib/logger';
 import { ensureMonitoredRepository, startGitHubSync } from './modules/github/github.service';
 import { evaluateHostSample } from './modules/incidents/host-alert-engine';
 import { handleServiceStatusChange } from './modules/incidents/incident-engine';
 import { startHostCollector } from './modules/telemetry/host-collector';
-import { startProbeScheduler } from './modules/telemetry/probe-scheduler';
+import { startProbeQueue } from './modules/telemetry/probe-queue';
+import { startProbeScheduler, type ServiceStatusChange } from './modules/telemetry/probe-scheduler';
 import { startRetentionJob } from './modules/telemetry/retention';
 import {
   RealtimeChannel,
@@ -48,14 +52,31 @@ const hostCollector = env.METRICS_COLLECTION_ENABLED
     })
   : null;
 
-const probeScheduler = env.PROBES_ENABLED
-  ? startProbeScheduler((change) => {
-      publisher.publish(RealtimeChannel.ServiceStatus, change);
-      // The alerting engine reacts to the same transitions the UI sees, so an
-      // incident is always backed by a status change a user can point at.
-      void handleServiceStatusChange(change);
-    })
-  : null;
+/**
+ * A status change goes to the clients attached to this instance and to the
+ * alerting engine, so an incident is always backed by a transition a user can
+ * point at.
+ */
+const onStatusChange = (change: ServiceStatusChange) => {
+  publisher.publish(RealtimeChannel.ServiceStatus, change);
+  void handleServiceStatusChange(change);
+};
+
+/**
+ * Probing runs through Redis when it is available and on an in-process timer
+ * otherwise.
+ *
+ * The timer is correct for a single instance and wrong for several: every
+ * replica would find the same due services and probe all of them, multiplying
+ * load on the endpoints being measured by the replica count, inflating the very
+ * latencies being reported, and interleaving results so that "three failures in
+ * a row" stops meaning what it says. The queue makes the sweep singular across
+ * the fleet while spreading the probes themselves over it.
+ */
+const probeQueue = isProbeQueueEnabled ? startProbeQueue(onStatusChange) : null;
+
+const probeScheduler =
+  env.PROBES_ENABLED && !probeQueue ? startProbeScheduler(onStatusChange) : null;
 
 const retentionJob = startRetentionJob();
 
@@ -80,8 +101,14 @@ const githubSync = env.GITHUB_SYNC_ENABLED && isGitHubPollingConfigured ? startG
 if (!hostCollector) {
   logger.warn('Host metric collection is disabled; the telemetry chart will have no data');
 }
-if (!probeScheduler) {
+if (!probeScheduler && !probeQueue) {
   logger.warn('Service probing is disabled; service health will not be measured');
+}
+if (probeScheduler) {
+  logger.info('Probing on an in-process timer; set REDIS_URL to distribute it across replicas');
+}
+if (isCacheEnabled) {
+  logger.info({ ttlSeconds: env.CACHE_TTL_SECONDS }, 'Read cache enabled');
 }
 if (!githubSync) {
   logger.info('GitHub polling is not active; the pipelines view reports it as not connected');
@@ -137,6 +164,12 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
     retentionJob.stop();
     githubSync?.stop();
     /**
+     * Awaited so a probe already in flight finishes rather than being abandoned
+     * mid-check, which would leave a service's consecutive-result counters
+     * describing an observation that never completed.
+     */
+    await probeQueue?.stop();
+    /**
      * Awaited, unlike the others: stopping the collector flushes the window it
      * has accumulated since the last write, and the database pool is closed a
      * few lines below.
@@ -162,6 +195,7 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
       });
     });
     await prisma.$disconnect();
+    await disconnectRedis();
     logger.info('Shutdown complete');
     process.exit(0);
   } catch (error) {
