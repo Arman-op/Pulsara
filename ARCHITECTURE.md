@@ -4,6 +4,11 @@ This document explains how Pulsara is built and, more importantly, **why** each
 decision was made. It is kept current as the system changes; where something is
 not yet implemented, that is stated rather than implied.
 
+[README.md](./README.md) is how to run it. [RUNBOOK.md](./RUNBOOK.md) is what to
+do when it breaks — a stalled probe worker, a GitHub App key to rotate, a bad
+release to roll back. This document is the reasoning behind both, and the
+argument you would have to make to change any of it.
+
 ---
 
 ## 1. What Pulsara is
@@ -32,35 +37,115 @@ script bootstraps *configuration* (which services exist) but never
 
 ## 2. System shape
 
+### The running system
+
 ```mermaid
 graph TD
-    subgraph Browser
-        SPA["React 19 SPA<br/>Vite · Zustand · Recharts"]
-    end
+    SPA["React 19 SPA<br/>Vite · Zustand · Recharts"]
 
-    subgraph "API process (Node 22)"
-        HTTP["Express 5 REST API"]
+    subgraph api["API process — one Node 22 process, one port"]
+        HTTP["Express 5<br/>REST · /metrics"]
         WS["Socket.IO server"]
+        COL["Host collector<br/>2s sample · 30s persist"]
+        PROBE["Probe worker"]
+        SYNC["GitHub sync"]
+        ENG["Alert engines<br/>host · service · delivery"]
     end
 
     DB[("PostgreSQL 16<br/>via Prisma")]
-    IDP["Firebase Auth<br/>(Google sign-in, optional)"]
+    REDIS[("Redis 7<br/>BullMQ queue + cache")]
+
+    HOST["Host counters<br/>systeminformation"]
+    TARGETS["Registered<br/>health-check URLs"]
+    GH["GitHub Actions"]
+    IDP["Firebase Auth<br/>optional"]
+    SCRAPER["Prometheus"]
 
     SPA -->|"REST + Bearer access token"| HTTP
-    SPA <-->|"WebSocket: live telemetry"| WS
+    SPA <-->|"WebSocket: live samples"| WS
     SPA -->|"Google popup"| IDP
     IDP -->|"ID token"| SPA
-    SPA -->|"POST /api/auth/firebase"| HTTP
     HTTP -->|"verify ID token"| IDP
+
+    HOST --> COL
+    COL --> WS
+    COL --> DB
+    COL --> ENG
+
+    REDIS <-->|"repeatable sweep + per-service jobs"| PROBE
+    PROBE --> TARGETS
+    PROBE --> DB
+    PROBE --> ENG
+
+    GH -->|"workflow_run / workflow_job<br/>X-Hub-Signature-256"| HTTP
+    SYNC <-->|"reconciling poll"| GH
+    SYNC --> DB
+    SYNC --> ENG
+
+    ENG -->|"open · escalate · resolve"| DB
     HTTP <--> DB
-    WS <--> DB
+    HTTP <-->|"read-through cache"| REDIS
+    SCRAPER -->|"GET /metrics"| HTTP
 ```
 
-The API is a single process that serves both HTTP and WebSocket traffic on one
-port. Splitting them would mean two deployables, two TLS configurations and two
-CORS policies for no benefit at this scale; Socket.IO's handshake is an ordinary
+The API is a single process serving both HTTP and WebSocket traffic on one port.
+Splitting them would mean two deployables, two TLS configurations and two CORS
+policies for no benefit at this scale; Socket.IO's handshake is an ordinary
 cross-origin HTTP request that upgrades in place, so it reuses the same origin
 allowlist as REST.
+
+Redis is optional and the system is complete without it — probes run on an
+in-process timer and reads go straight to PostgreSQL. That is correct for one
+instance and wrong for several, because every replica would probe every service
+and multiply load on the endpoints being measured.
+
+### The deployed system
+
+```mermaid
+graph TD
+    USER["Browser"]
+    R53["Route 53<br/>alias record"]
+
+    subgraph vpc["VPC — two availability zones"]
+        subgraph public["Public subnets"]
+            ALB["Application Load Balancer<br/>:443, ACM certificate"]
+        end
+
+        subgraph private["Private subnets — no inbound route"]
+            WEB["web service<br/>Fargate · nginx :8080"]
+            API["api service<br/>Fargate · Node :4000"]
+            RDS[("RDS PostgreSQL")]
+            EC[("ElastiCache Redis")]
+            MIG["migration task<br/>one-off, on the API's SG"]
+        end
+    end
+
+    SM["Secrets Manager"]
+    ECR["ECR"]
+    GHA["GitHub Actions<br/>OIDC, no static keys"]
+
+    USER --> R53 --> ALB
+    ALB -->|"/api/*, /socket.io/*"| API
+    ALB -->|"everything else"| WEB
+    API --> RDS
+    API --> EC
+    MIG --> RDS
+    SM -.->|"resolved by the ECS agent<br/>before the container starts"| API
+    GHA -->|"push image"| ECR
+    ECR -.->|"pull"| API
+    ECR -.->|"pull"| WEB
+    GHA -->|"run migration, then update service"| MIG
+```
+
+Public subnets hold exactly one thing. Both services, the database and the cache
+have no inbound route from the internet, so the reachable surface of the whole
+deployment is two ports on the load balancer. The two things that usually force
+a hole in that — running migrations and getting a shell — have answers that do
+not: migrations run as a one-off task on the API's own security group, and a
+shell is ECS Exec.
+
+Both halves are served from one hostname, split by path, which is what removes
+cross-site cookies and CORS from production entirely.
 
 ---
 
@@ -1026,9 +1111,23 @@ What it exposes, and why each is there:
 | `pulsara_host_sample_age_seconds` | A stopped collector otherwise looks like a perfectly steady machine |
 | `pulsara_host_alert_threshold_ratio` | So a dashboard draws the line the engine is actually using |
 | `pulsara_service_up`, `_uptime_ratio`, `_latency_seconds` | Availability, with `state` as a label so maintenance is not an outage |
+| `pulsara_service_last_check_age_seconds`, `_probe_interval_seconds` | A stalled prober is otherwise invisible — see below |
 | `pulsara_incidents_open` | Emitted at zero for every severity, because an alert on an absent series never fires |
 | `pulsara_deployments` | Delivery outcomes alongside runtime health |
 | `process_*`, `nodejs_*` | Standard names, taken from `prom-client` rather than reinvented |
+
+The service age pair deserves its own paragraph, because it exists for a
+failure the rest of the exposition cannot express. If probing stalls — a lost
+repeatable schedule, a saturated queue, a wedged process — nothing goes red. The
+uptime and latency series keep reporting the last window they measured, the
+dashboard keeps rendering them, and the alerting engines stay quiet, because
+they open incidents from observations and an absent observation is not a failed
+one. That silence is deliberate: treating "no data" as "down" would page the
+whole fleet on every deployment. The cost of the choice is that a stopped prober
+looks exactly like a healthy one, and the age is what pays it. The interval is
+published beside it so an alert compares each service against its own schedule
+rather than against a single threshold that is wrong for everything except the
+median.
 
 Conventions are followed rather than improvised, because getting them wrong is
 what makes an exporter unpleasant to consume: base units throughout (seconds and
@@ -1282,6 +1381,56 @@ Everything environment-specific — region, cluster, service and task-definition
 names, subnets, security groups — is a repository variable, and the role ARN is
 the single secret. The `production` GitHub environment gates the run, so a
 release that is not allowed to proceed cannot read the credentials either.
+
+### Fargate, rather than EC2 or EKS
+
+The question is not which is most capable. It is which one's operational
+surface a two-service system can justify.
+
+| | ECS on Fargate | ECS on EC2 | EKS |
+| :--- | :--- | :--- | :--- |
+| Hosts to patch | None | Every instance, forever | Every node, plus the control plane's version |
+| Standing cost before any workload | None | The instances, running or not | ~$73/month for the control plane alone |
+| Upgrade cadence imposed on you | None | AMI refreshes | A Kubernetes minor roughly every four months, with a support window |
+| Per-vCPU-hour price | Highest | Lowest | Node price plus the control plane |
+| Network identity | Per task, awsvpc by default | Per task with awsvpc, per instance otherwise | Per pod, once the CNI and IRSA are configured |
+| What you write | A task definition | A task definition, plus capacity management | Deployments, Services, Ingress, HPA, and the controllers behind them |
+
+**EC2 is cheaper per vCPU and more expensive per engineer.** It brings capacity
+planning, cluster autoscaling, AMI patching and a second class of thing that can
+be unhealthy — an instance that is full, or draining, or running a kernel
+somebody needs to replace. On a footprint of roughly two vCPU total, the saving
+is a few tens of dollars a month against a standing operational obligation.
+Fargate's premium buys the removal of an entire category of incident.
+
+**EKS is the right answer to a problem this does not have.** It earns its
+control-plane bill and its upgrade treadmill when there are many services, many
+teams needing namespace-level isolation, or scheduling requirements ECS cannot
+express — pod affinity, custom schedulers, operators that reconcile things ECS
+has no concept of. Choosing it for two containers means adopting a platform, a
+version-skew policy and a set of controllers to keep current, in exchange for
+capabilities nothing here uses. That is the kind of decision that looks
+impressive on a diagram and shows up later as an afternoon lost to a CNI
+upgrade.
+
+**What Fargate specifically buys this design.** Task-level `awsvpc` networking
+is not a convenience here — it is the thing that makes the security-group rules
+in §15 expressible at all. "The database accepts connections from the API tasks"
+is a sentence only because each task has its own network interface and its own
+security group. On EC2 without awsvpc the rule degrades to "from these
+instances", which stays true when somebody schedules something else onto them.
+
+**What it costs, honestly.** Roughly 20-30% more per vCPU-hour than the
+equivalent EC2 capacity; no daemonsets and no host access, so anything wanting a
+node-level agent needs a sidecar instead; task start-up measured in tens of
+seconds rather than the milliseconds a warm host gives you; and no GPUs or large
+local disks. None of those constrain this workload — but if the answer to "why
+not EC2" were "there is no downside", the comparison would not have been done.
+
+The decision is also cheap to revisit. The unit of deployment is a task
+definition either way, so moving to EC2 capacity later is a capacity-provider
+change and a cluster with instances in it — not a rewrite. Moving to EKS is a
+rewrite, which is the asymmetry that settles it.
 
 ### Infrastructure as code
 
