@@ -1,0 +1,21 @@
+{
+  "name": "@pulsara/e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Browser tests that drive the real API and the real client together.",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "install:browsers": "playwright install --with-deps chromium",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write \"**/*.{ts,json}\"",
+    "format:check": "prettier --check \"**/*.{ts,json}\""
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@types/node": "^25.9.5",
+    "prettier": "^3.9.6",
+    "typescript": "^6.0.3"
+  }
+}
