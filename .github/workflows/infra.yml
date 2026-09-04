@@ -1,0 +1,237 @@
+name: Infrastructure
+
+# A plan on every pull request that touches infra/. Never an apply on its own.
+#
+# Applying is possible here, but only by deliberately dispatching this workflow
+# with `apply: true`, and only after the `infrastructure` environment's required
+# reviewers have approved the run. Nothing about a merge, a push or a schedule
+# reaches the apply job.
+#
+# That gate is not ceremony. Applying this configuration creates IAM roles and
+# attaches policies to them, which is indistinguishable from administrator
+# access — a role able to do it can grant itself anything — so the role the
+# apply job assumes is deliberately *not* created by this configuration either.
+# See infra/iam.tf, next to the role it declines to declare.
+on:
+  pull_request:
+    paths: ['infra/**', '.github/workflows/infra.yml']
+  push:
+    branches: [main]
+    paths: ['infra/**', '.github/workflows/infra.yml']
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: 'Apply the plan after approval. Leave false to plan only.'
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  TERRAFORM_VERSION: '1.14.8'
+  # The plan is read from the pull request, so it has to be legible there.
+  TF_IN_AUTOMATION: 'true'
+  TF_INPUT: '0'
+
+defaults:
+  run:
+    working-directory: infra
+
+jobs:
+  # --- Checks that need no credentials ---------------------------------------
+  #
+  # Split out because they are the only thing a fork's pull request can run:
+  # GitHub does not grant `id-token: write` to a workflow triggered from a fork,
+  # so the plan below cannot assume a role there. A contributor without access
+  # to the AWS account still gets formatting and syntax checked rather than a
+  # red cross with a permissions error on it.
+  validate:
+    name: Format and validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          # The wrapper rewrites stdout to add its own annotations, which
+          # mangles the plan text the summary below reproduces verbatim.
+          terraform_wrapper: false
+
+      - name: Format
+        run: terraform fmt -recursive -check -diff
+
+      # No backend, so this needs no credentials and no state. It checks the
+      # configuration is internally consistent — types, required arguments,
+      # references between resources — which is most of what a broken change
+      # gets wrong.
+      - name: Init without a backend
+        run: terraform init -backend=false
+
+      - name: Validate
+        run: terraform validate
+
+  # --- The plan --------------------------------------------------------------
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    needs: validate
+    # A fork's pull request has no OIDC token to offer, so this job would fail
+    # for a reason unrelated to the change under review.
+    if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      # A read-only role, assumed over OIDC. There is no AWS access key in this
+      # repository; infra/iam.tf declares this role and the trust policy that
+      # restricts it to this repository.
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_PLAN_ROLE_ARN }}
+          role-session-name: pulsara-tf-plan-${{ github.run_id }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ vars.TF_STATE_KEY }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}" \
+            -backend-config="use_lockfile=true"
+
+      - name: Plan
+        id: plan
+        env:
+          TF_VAR_domain_name: ${{ vars.PRODUCTION_DOMAIN_NAME }}
+          TF_VAR_route53_zone_id: ${{ vars.ROUTE53_ZONE_ID }}
+          TF_VAR_state_bucket: ${{ vars.TF_STATE_BUCKET }}
+          TF_VAR_state_key: ${{ vars.TF_STATE_KEY }}
+          TF_VAR_aws_region: ${{ vars.AWS_REGION }}
+          TF_VAR_repository: ${{ github.repository }}
+        run: |
+          # -detailed-exitcode distinguishes "no changes" (0) from "changes
+          # pending" (2), which is what lets the summary below say something
+          # useful instead of just "it ran".
+          #
+          # The exit code is captured rather than allowed to end the step: the
+          # runner's shell has `-e` set, so a plan reporting pending changes
+          # would otherwise abort here and never reach the summary.
+          set +e
+          terraform plan -no-color -detailed-exitcode | tee plan.txt
+          code=${PIPESTATUS[0]}
+          set -e
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Summarise
+        run: |
+          {
+            echo "## Terraform plan"
+            echo
+            case "${{ steps.plan.outputs.exitcode }}" in
+              0) echo "No changes. The account matches the configuration." ;;
+              2) echo "Changes pending. Read them before merging." ;;
+              *) echo "The plan failed. Output below." ;;
+            esac
+            echo
+            echo '```terraform'
+            # The step summary has a 1 MiB ceiling and a plan that recreates the
+            # VPC is long, so it is trimmed rather than silently truncated.
+            tail -c 60000 plan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Fail the job on a plan error, but not on "changes pending" — a pull
+      # request that proposes infrastructure changes is the normal case, and a
+      # red cross on it would train everybody to ignore this job.
+      - name: Fail on a plan error
+        if: steps.plan.outputs.exitcode != '0' && steps.plan.outputs.exitcode != '2'
+        run: |
+          echo "::error::terraform plan failed. See the job summary."
+          exit 1
+
+# Deliberately no `-out=tfplan`, and no artifact upload.
+#
+# A saved plan file is not a summary — it contains the resource attributes the
+# state does, including the values Terraform generated for the database password
+# and the JWT signing keys. The rendered text above redacts them, because
+# Terraform marks them sensitive; the binary file does not. Uploading one would
+# make production credentials downloadable by anybody who can read the run, and
+# it would look like an ordinary convenience while doing it.
+#
+# The cost is that an apply re-plans rather than replaying exactly what was
+# reviewed. Since apply is a human action here anyway, that human re-reads the
+# plan in their own terminal, which is the same review a step further along.
+
+  # --- Apply, behind two gates ----------------------------------------------
+  apply:
+    name: Apply
+    runs-on: ubuntu-latest
+    needs: plan
+    # Gate one: a person dispatched this run and asked for it. No push, no
+    # merge, and no schedule can reach here.
+    if: github.event_name == 'workflow_dispatch' && inputs.apply
+
+    # Gate two: the environment's required reviewers. The credentials resolve
+    # from it, so a run nobody approves cannot read them either — the approval
+    # is what unlocks the role, not merely what unpauses the job.
+    environment: infrastructure
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      # A role with enough authority to create IAM roles, so it is provisioned
+      # out of band rather than by the configuration it applies. Terraform
+      # creating the role that lets a workflow run Terraform is a loop with an
+      # account takeover in the middle of it.
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_APPLY_ROLE_ARN }}
+          role-session-name: pulsara-tf-apply-${{ github.run_id }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ vars.TF_STATE_KEY }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}" \
+            -backend-config="use_lockfile=true"
+
+      # Re-plans rather than replaying a saved plan file, because a saved plan
+      # carries the values the state does — the generated database password
+      # included — and is not something to hand around as an artifact. The
+      # reviewer approving this run has the plan job's summary in front of them.
+      - name: Apply
+        env:
+          TF_VAR_domain_name: ${{ vars.PRODUCTION_DOMAIN_NAME }}
+          TF_VAR_route53_zone_id: ${{ vars.ROUTE53_ZONE_ID }}
+          TF_VAR_state_bucket: ${{ vars.TF_STATE_BUCKET }}
+          TF_VAR_state_key: ${{ vars.TF_STATE_KEY }}
+          TF_VAR_aws_region: ${{ vars.AWS_REGION }}
+          TF_VAR_repository: ${{ github.repository }}
+        run: terraform apply -no-color -auto-approve

@@ -41,6 +41,14 @@ updates:
       e2e-minor-and-patch:
         update-types: ['minor', 'patch']
 
+  # Provider versions are pinned in infra/.terraform.lock.hcl by checksum, so
+  # they never drift on their own — which is the point, and also why nothing
+  # would ever update them without this.
+  - package-ecosystem: terraform
+    directory: /infra
+    schedule:
+      interval: monthly
+
   # The workflows themselves pin action versions, which go stale silently.
   - package-ecosystem: github-actions
     directory: /
