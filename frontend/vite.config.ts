@@ -36,7 +36,37 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       include: ['src/**/*.{ts,tsx}'],
-      exclude: ['src/main.tsx', 'src/**/*.test.{ts,tsx}', 'src/test/**'],
+      exclude: [
+        'src/main.tsx',
+        'src/**/*.test.{ts,tsx}',
+        'src/test/**',
+        // Type declarations only. They compile away, so counting them measures
+        // nothing and drags the figure down by a few hundred lines.
+        'src/shared/api/types.ts',
+        // Presentational primitives: a Card that renders its children has no
+        // decision in it, and covering them would raise the number without
+        // testing anything somebody could get wrong.
+        'src/shared/components/{Badge,Button,Card,Drawer,Input,StatusDot,Table}.tsx',
+      ],
+      reporter: ['text-summary', 'lcov'],
+
+      /**
+       * A floor set just under what the suite reaches today, so it ratchets:
+       * removing coverage fails, adding it raises the bar. An aspirational
+       * threshold fails on unrelated work until somebody lowers it, and a
+       * threshold lowered twice means nothing.
+       *
+       * Deliberately lower than the API's. The screens are mostly markup, and
+       * the parts worth asserting — the request client, the route guard, the
+       * rule that an unmeasured value renders as an em dash — are covered
+       * directly rather than by chasing a percentage through JSX.
+       */
+      thresholds: {
+        lines: 42,
+        statements: 42,
+        functions: 60,
+        branches: 75,
+      },
     },
   },
 
