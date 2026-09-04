@@ -101,8 +101,11 @@ jobs:
       - name: Unit tests
         run: npm run test:unit
 
-      - name: Integration tests
-        run: npm run test:integration
+      # Coverage rather than a plain run: the thresholds in vitest.config.ts are
+      # a floor set just under what the suite reaches, so a change that removes
+      # coverage fails here rather than being noticed a release later.
+      - name: Integration tests with coverage
+        run: npm run test:coverage
 
       - name: Build
         run: npm run build
@@ -144,11 +147,71 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Tests
-        run: npm test
+      - name: Tests with coverage
+        run: npm run test:coverage
 
       - name: Build
         run: npm run build
+
+  e2e:
+    name: End to end
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: pulsara
+          POSTGRES_PASSWORD: pulsara_ci
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pulsara"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      E2E_DATABASE_URL: postgresql://pulsara:pulsara_ci@localhost:5432/pulsara_e2e
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # Playwright starts both servers itself, so both packages need installing.
+      - name: Install
+        run: |
+          npm --prefix backend ci
+          npm --prefix frontend ci
+          npm --prefix e2e ci
+
+      - name: Generate Prisma client
+        run: npm --prefix backend run db:generate
+
+      - name: Format
+        run: npm --prefix e2e run format:check
+
+      - name: Typecheck
+        run: npm --prefix e2e run typecheck
+
+      - name: Install Chromium
+        run: npm --prefix e2e run install:browsers
+
+      - name: Run the browser suite
+        run: npm --prefix e2e test
+
+      # Only on failure: a passing run should leave nothing behind, and a trace
+      # is what makes a failure diagnosable without reproducing it locally.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-trace
+          path: e2e/test-results/
+          retention-days: 7
 
   images:
     name: Images

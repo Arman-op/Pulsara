@@ -29,6 +29,18 @@ updates:
       frontend-minor-and-patch:
         update-types: ['minor', 'patch']
 
+  # Playwright is the one dependency here that has to keep pace with a browser,
+  # so leaving it out would mean the browser suite quietly ages out of what
+  # Chromium actually does.
+  - package-ecosystem: npm
+    directory: /e2e
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      e2e-minor-and-patch:
+        update-types: ['minor', 'patch']
+
   # The workflows themselves pin action versions, which go stale silently.
   - package-ecosystem: github-actions
     directory: /
