@@ -181,7 +181,52 @@ const serviceProbes = new Gauge({
   registers: [registry],
 });
 
-const SERVICE_GAUGES = [serviceUp, serviceUptime, serviceLatency, serviceProbes];
+/**
+ * How long ago each service was last probed.
+ *
+ * The counterpart to `host_sample_age_seconds`, and it exists for a failure the
+ * other series cannot express. If the probe worker stalls — a lost repeatable
+ * schedule, a saturated queue, a wedged process — nothing here goes red. The
+ * uptime and latency figures keep reporting the last window they measured, the
+ * dashboard keeps rendering them, and the alerting engines stay quiet, because
+ * they open incidents from observations and an absent observation is not a
+ * failed one.
+ *
+ * That silence is deliberate: treating "no data" as "down" would page the whole
+ * fleet on every deployment. The cost of the choice is that stalled probing is
+ * invisible, and this is what makes it visible. Alert on this against each
+ * service's own probe interval.
+ *
+ * Absent, not zero, for a service that has never been probed. Zero would read
+ * as "checked just now", which is the opposite of the truth.
+ */
+const serviceLastCheckAge = new Gauge({
+  name: `${PREFIX}service_last_check_age_seconds`,
+  help: 'Seconds since this service was last probed. Absent if it never has been.',
+  labelNames: ['service'],
+  registers: [registry],
+});
+
+/**
+ * The interval each service is configured to be probed at, so an alert can
+ * compare the age above against the service's own schedule instead of against
+ * one threshold that is wrong for everything except the median.
+ */
+const serviceProbeInterval = new Gauge({
+  name: `${PREFIX}service_probe_interval_seconds`,
+  help: 'Configured seconds between probes for this service.',
+  labelNames: ['service'],
+  registers: [registry],
+});
+
+const SERVICE_GAUGES = [
+  serviceUp,
+  serviceUptime,
+  serviceLatency,
+  serviceProbes,
+  serviceLastCheckAge,
+  serviceProbeInterval,
+];
 
 /** Same reasoning as the host group: one query, one consistent set of series. */
 async function refreshServiceGauges(): Promise<void> {
@@ -190,7 +235,14 @@ async function refreshServiceGauges(): Promise<void> {
   const [services, health] = await Promise.all([
     prisma.service.findMany({
       where: { isMonitored: true },
-      select: { id: true, name: true, status: true },
+      select: {
+        id: true,
+        name: true,
+        status: true,
+        lastCheckedAt: true,
+        probeIntervalSeconds: true,
+        probeType: true,
+      },
     }),
     getServiceHealth(),
   ]);
@@ -205,6 +257,22 @@ async function refreshServiceGauges(): Promise<void> {
       { service: service.name, state: service.status },
       service.status === ServiceState.ONLINE ? 1 : 0,
     );
+
+    /**
+     * Only for services that are actually probed. A registered service with no
+     * `probeType` is catalogued rather than checked, so an ever-growing age for
+     * it would be a false alarm about a schedule that was never meant to exist.
+     */
+    if (service.probeType !== null) {
+      serviceProbeInterval.set({ service: service.name }, service.probeIntervalSeconds);
+      setOrOmit(
+        serviceLastCheckAge,
+        { service: service.name },
+        service.lastCheckedAt === null
+          ? null
+          : (Date.now() - service.lastCheckedAt.getTime()) / MS_PER_SECOND,
+      );
+    }
 
     const measured = health.get(service.id);
     if (!measured) continue;

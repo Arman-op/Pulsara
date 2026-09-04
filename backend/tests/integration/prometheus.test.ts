@@ -1,4 +1,4 @@
-import { DeploymentStatus, ServiceState, Severity } from '@prisma/client';
+import { DeploymentStatus, ProbeType, ServiceState, Severity } from '@prisma/client';
 import request from 'supertest';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { app } from '../../src/app';
@@ -207,6 +207,74 @@ describe('service gauges', () => {
 
     expect(sample(body, 'pulsara_service_up', 'service="Unprobed"')).toBe(0);
     expect(sample(body, 'pulsara_service_uptime_ratio', 'service="Unprobed"')).toBeNull();
+  });
+
+  it('reports how long ago each service was probed, beside its own interval', async () => {
+    /**
+     * The pair exists for a failure nothing else here can express: if the probe
+     * worker stalls, every other service series keeps reporting the last window
+     * it measured and the alerting engines stay quiet, because they open
+     * incidents from observations and an absent observation is not a failed
+     * one. The age is what makes a stopped prober visible, and the interval is
+     * what an alert compares it against — one global threshold would be wrong
+     * for everything except the median service.
+     */
+    await prisma.service.create({
+      data: {
+        name: 'Checked',
+        status: ServiceState.ONLINE,
+        probeType: ProbeType.HTTP,
+        probeTarget: 'https://example.test/health',
+        probeIntervalSeconds: 45,
+        lastCheckedAt: new Date(Date.now() - 90_000),
+      },
+    });
+
+    const body = (await scrape().expect(200)).text;
+
+    expect(sample(body, 'pulsara_service_probe_interval_seconds', 'service="Checked"')).toBe(45);
+    // Ninety seconds ago, in seconds, allowing for the time the scrape took.
+    expect(sample(body, 'pulsara_service_last_check_age_seconds', 'service="Checked"')).toBeCloseTo(
+      90,
+      0,
+    );
+  });
+
+  it('leaves the age absent for a service that is catalogued but not probed', async () => {
+    /**
+     * Two different absences, and both must stay absent rather than become
+     * zero. A service with no `probeType` is registered for reference and has
+     * no schedule to be late for; a probed service that has never run yet has
+     * no age to report. Zero would read as "checked just now", which is the
+     * opposite of the truth in both cases.
+     */
+    await prisma.service.create({
+      data: { name: 'Catalogued', status: ServiceState.ONLINE, probeIntervalSeconds: 30 },
+    });
+    await prisma.service.create({
+      data: {
+        name: 'Never run',
+        status: ServiceState.ONLINE,
+        probeType: ProbeType.TCP,
+        probeTarget: 'db.example.test:5432',
+        probeIntervalSeconds: 30,
+      },
+    });
+
+    const body = (await scrape().expect(200)).text;
+
+    expect(
+      sample(body, 'pulsara_service_probe_interval_seconds', 'service="Catalogued"'),
+    ).toBeNull();
+    expect(
+      sample(body, 'pulsara_service_last_check_age_seconds', 'service="Catalogued"'),
+    ).toBeNull();
+
+    // Scheduled, so its interval is published; never run, so it has no age.
+    expect(sample(body, 'pulsara_service_probe_interval_seconds', 'service="Never run"')).toBe(30);
+    expect(
+      sample(body, 'pulsara_service_last_check_age_seconds', 'service="Never run"'),
+    ).toBeNull();
   });
 });
 
