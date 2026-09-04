@@ -1216,6 +1216,56 @@ read-only token; it must not be able to publish a tag that a deployment might
 pull, and it does not even attempt the registry login, because a failure there
 would fail the job for a reason unrelated to the change under review.
 
+### Deployment
+
+`.github/workflows/deploy.yml` runs on a push to `main`, and can be re-run by
+hand — the recovery path when a release fails halfway, since pushing an empty
+commit to re-trigger a workflow is not a rollback procedure.
+
+**There is no AWS access key in this repository.** The workflow assumes an IAM
+role through GitHub's OIDC provider: GitHub signs a short-lived token describing
+the repository, ref and workflow that requested it, and the role's trust policy
+decides whether to honour it. That trust policy is where a deployment is
+actually restricted — to this repository, and to `ref:refs/heads/main` — and it
+is why there is no static credential here to leak, to rotate, or to forget to
+rotate. `id-token: write` is granted per job rather than workflow-wide, so the
+token is minted only in the jobs that use it.
+
+The order is the whole design:
+
+1. **Build.** Both images, tagged with the commit SHA. Never `latest`: given a
+   running task you should be able to name the commit that produced it.
+2. **Migrate.** Register a new API task-definition revision pointing at the new
+   image, then run `prisma migrate deploy` as a one-off ECS task *from that
+   revision*. Same image, same secrets, same subnets as the thing about to serve
+   traffic — a migration run from the runner with its own copy of the connection
+   string is a second configuration to keep in step, and it is the one nobody
+   notices has drifted. It also means the production database needs no public
+   route: opening port 5432 to GitHub's shared runners so a CI step could reach
+   it would be a far larger hole than it saves work.
+3. **Deploy the API**, onto the revision the migration ran from, so the running
+   code and the schema it expects were never two separate decisions.
+4. **Deploy the client**, only after the API has stabilised. There is no point
+   shipping a bundle that talks to an API which would not start.
+
+Two details carry more weight than their size suggests. `aws ecs wait
+tasks-stopped` reports only that the migration task *finished*; the job reads
+the container's exit code afterwards, because a failed migration allowed to look
+like a success is exactly how a service ends up deployed against a schema it
+does not have. And each deployment waits for `services-stable` rather than going
+green when ECS accepts the request — otherwise the workflow reports success
+about an API that never passed a single health check.
+
+The release concurrency group sets `cancel-in-progress: false`. That is the
+opposite of the CI setting, and deliberately so: cancelling a run between
+`migrate deploy` and `update-service` would leave the database ahead of every
+container still serving.
+
+Everything environment-specific — region, cluster, service and task-definition
+names, subnets, security groups — is a repository variable, and the role ARN is
+the single secret. The `production` GitHub environment gates the run, so a
+release that is not allowed to proceed cannot read the credentials either.
+
 ---
 
 ## 16. Dependencies and advisories
@@ -1281,6 +1331,7 @@ kind of call a person should make rather than a bot.
 | Dependency audit gate | Implemented |
 | Automated tests | Implemented |
 | Container images and CI | Implemented |
+| Deployment pipeline (ECR, migrations, ECS) | Written, **not verified** |
 | Google sign-in verified against a live Firebase project | **Not verified** |
 | GitHub polling verified against a live repository | **Not verified** |
 
@@ -1288,10 +1339,19 @@ Deployments and incidents stay empty until their sources exist. Those views show
 empty states rather than placeholder rows, because an empty list is the truth
 about a system with no CI integration configured.
 
-The last two rows are the honest ones. Both paths are implemented and covered by
-tests that stub exactly one function each — Firebase's token verification and
-GitHub's HTTP client — so everything the application itself does is exercised.
-Neither has been run against a real Firebase project or a real GitHub token,
-because this repository has no credentials for either, and saying "works" of
-something nobody has watched work would be the same species of claim this
-project was built to remove.
+The last three rows are the honest ones.
+
+Firebase sign-in and GitHub polling are both implemented and covered by tests
+that stub exactly one function each — Firebase's token verification and GitHub's
+HTTP client — so everything the application itself does is exercised. Neither
+has been run against a real Firebase project or a real GitHub token, because
+this repository has no credentials for either.
+
+`deploy.yml` is in the same position, and more so. Its YAML parses, the actions
+it calls are the current major versions, and each step is the operation it
+claims to be — but no run of it has ever happened, because that needs an AWS
+account with an ECR registry, an ECS cluster, two services, task definitions and
+an IAM role trusting this repository's OIDC subject. Read it as a reviewable
+design for a release, not as a pipeline anybody has watched go green. Saying
+"works" of something nobody has watched work would be the same species of claim
+this project was built to remove.

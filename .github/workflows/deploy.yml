@@ -1,0 +1,375 @@
+name: Deploy
+
+# Production release: build the images, apply the schema, then move the
+# services onto the new revision — in that order, because a container that
+# starts before its migration has run will fail on its first query.
+#
+# Only `main` deploys. CI already ran on the pull request that produced the
+# merge commit; this workflow deliberately does not re-run the test suite,
+# because a deployment that can be blocked by a flaky test is a deployment
+# nobody trusts, and a commit reaching `main` without a green CI run is a
+# branch-protection problem rather than something to paper over here.
+on:
+  push:
+    branches: [main]
+  # Re-running a release by hand is the recovery path when a deploy fails
+  # halfway: the image is already in ECR, and pushing an empty commit to
+  # re-trigger a workflow is not a rollback procedure.
+  workflow_dispatch:
+
+# One release at a time, and never cancelled. `cancel-in-progress: true` — the
+# right answer for CI — would be actively dangerous here: it can kill the run
+# between `migrate deploy` and `update-service`, leaving the database ahead of
+# every container still serving traffic.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+# Read-only by default. Each job that talks to AWS asks for `id-token: write`
+# itself, so the OIDC token is minted only where it is actually used.
+permissions:
+  contents: read
+
+env:
+  # Immutable and traceable: given a running task you can name the commit that
+  # produced it, which a moving `latest` tag cannot do.
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  # --- Build and publish ----------------------------------------------------
+  build:
+    name: Build and push images
+    runs-on: ubuntu-latest
+    # Gates the release behind whatever the `production` environment requires:
+    # reviewers, a wait timer, a branch restriction. The secrets below resolve
+    # from that environment, so a run that is not allowed to proceed cannot
+    # read the credentials either.
+    environment: production
+
+    permissions:
+      contents: read
+      # Required to mint the OIDC token. This is what replaces a long-lived
+      # AWS_ACCESS_KEY_ID: GitHub signs a short-lived JWT describing this
+      # repository, ref and workflow, and the IAM role's trust policy decides
+      # whether to honour it. There is no static AWS credential in this
+      # repository to leak, to rotate, or to forget to rotate.
+      id-token: write
+
+    outputs:
+      api-image: ${{ steps.images.outputs.api }}
+      web-image: ${{ steps.images.outputs.web }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: pulsara-deploy-${{ github.run_id }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Sign in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Resolve image references
+        id: images
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          API_REPOSITORY: ${{ vars.ECR_REPOSITORY_API }}
+          WEB_REPOSITORY: ${{ vars.ECR_REPOSITORY_WEB }}
+        run: |
+          echo "api=$REGISTRY/$API_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "web=$REGISTRY/$WEB_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push the API image
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          push: true
+          tags: ${{ steps.images.outputs.api }}
+          # ECR rejects the OCI attestation manifest buildx attaches by
+          # default, with an error that reads like a permissions problem.
+          provenance: false
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+
+      - name: Build and push the web image
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          push: true
+          tags: ${{ steps.images.outputs.web }}
+          provenance: false
+          # Vite inlines every VITE_* value at build time, so the client image
+          # is built for one deployment and cannot be repointed afterwards.
+          # These are public values, served inside the bundle to every visitor
+          # — a Firebase web API key identifies the project, and access is
+          # controlled by authorised domains and security rules rather than by
+          # hiding it — so they are repository variables, not secrets.
+          build-args: |
+            VITE_API_URL=${{ vars.VITE_API_URL }}
+            VITE_FIREBASE_API_KEY=${{ vars.VITE_FIREBASE_API_KEY }}
+            VITE_FIREBASE_AUTH_DOMAIN=${{ vars.VITE_FIREBASE_AUTH_DOMAIN }}
+            VITE_FIREBASE_PROJECT_ID=${{ vars.VITE_FIREBASE_PROJECT_ID }}
+            VITE_FIREBASE_APP_ID=${{ vars.VITE_FIREBASE_APP_ID }}
+            VITE_FIREBASE_MESSAGING_SENDER_ID=${{ vars.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+            VITE_FIREBASE_STORAGE_BUCKET=${{ vars.VITE_FIREBASE_STORAGE_BUCKET }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+
+  # --- Schema ---------------------------------------------------------------
+  migrate:
+    name: Apply migrations
+    runs-on: ubuntu-latest
+    needs: build
+    environment: production
+
+    permissions:
+      contents: read
+      id-token: write
+
+    outputs:
+      api-task-definition: ${{ steps.register.outputs.arn }}
+
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: pulsara-migrate-${{ github.run_id }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # The new revision is registered here rather than in the deploy job so
+      # that the migration runs from exactly the definition that is about to
+      # serve traffic: same image, same secrets, same subnets. A migration run
+      # from the runner with its own copy of the connection string is a second
+      # configuration to keep in step, and it is the one nobody notices has
+      # drifted until a release fails.
+      - name: Register a revision pointing at the new image
+        id: register
+        env:
+          FAMILY: ${{ vars.ECS_TASK_FAMILY_API }}
+          CONTAINER: ${{ vars.ECS_CONTAINER_API }}
+          IMAGE: ${{ needs.build.outputs.api-image }}
+        run: |
+          set -euo pipefail
+
+          # The new definition is the current one with one field changed, so
+          # that memory, secrets, log configuration and networking stay whatever
+          # they were last set to — this workflow is not the owner of any of it.
+          #
+          # `describe-task-definition` returns fields that `register-task-
+          # definition` rejects: they describe a registered revision rather than
+          # requesting one, and leaving them in fails with an unknown-parameter
+          # error that reads like a malformed request.
+          aws ecs describe-task-definition \
+            --task-definition "$FAMILY" \
+            --query 'taskDefinition' \
+            --output json > current.json
+
+          jq --arg name "$CONTAINER" --arg image "$IMAGE" '
+            del(
+              .taskDefinitionArn, .revision, .status, .requiresAttributes,
+              .compatibilities, .registeredAt, .registeredBy, .deregisteredAt
+            )
+            | .containerDefinitions |= map(
+                if .name == $name then .image = $image else . end
+              )
+          ' current.json > next.json
+
+          # A typo in ECS_CONTAINER_API would otherwise register a revision
+          # identical to the last one and deploy the old image, silently.
+          if ! jq -e --arg image "$IMAGE" \
+               'any(.containerDefinitions[]; .image == $image)' next.json > /dev/null; then
+            echo "::error::No container named '$CONTAINER' in task family '$FAMILY'. Check the ECS_CONTAINER_API variable."
+            exit 1
+          fi
+
+          arn=$(aws ecs register-task-definition \
+            --cli-input-json file://next.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          echo "Registered $arn"
+          echo "arn=$arn" >> "$GITHUB_OUTPUT"
+
+      # `prisma migrate deploy`, never `migrate dev` — the latter wants a TTY
+      # and will offer to reset a database it believes has drifted.
+      #
+      # It runs as a one-off ECS task rather than from the runner because the
+      # production database has no public route into it, and opening one so a
+      # CI step can reach port 5432 from GitHub's shared runners would be a far
+      # larger hole than this saves work. The image already carries
+      # prisma/migrations, so this needs nothing but a command override.
+      - name: Run prisma migrate deploy
+        env:
+          CLUSTER: ${{ vars.ECS_CLUSTER }}
+          CONTAINER: ${{ vars.ECS_CONTAINER_API }}
+          TASK_DEFINITION: ${{ steps.register.outputs.arn }}
+          SUBNETS: ${{ vars.ECS_SUBNET_IDS }}
+          SECURITY_GROUPS: ${{ vars.ECS_SECURITY_GROUP_IDS }}
+        run: |
+          set -euo pipefail
+
+          overrides=$(jq -nc --arg name "$CONTAINER" \
+            '{containerOverrides: [{name: $name, command: ["npx", "prisma", "migrate", "deploy"]}]}')
+
+          network=$(jq -nc --arg subnets "$SUBNETS" --arg groups "$SECURITY_GROUPS" \
+            '{awsvpcConfiguration: {
+                subnets: ($subnets | split(",")),
+                securityGroups: ($groups | split(",")),
+                assignPublicIp: "DISABLED"
+              }}')
+
+          task_arn=$(aws ecs run-task \
+            --cluster "$CLUSTER" \
+            --task-definition "$TASK_DEFINITION" \
+            --launch-type FARGATE \
+            --count 1 \
+            --started-by "deploy-${{ github.run_id }}" \
+            --overrides "$overrides" \
+            --network-configuration "$network" \
+            --query 'tasks[0].taskArn' \
+            --output text)
+
+          echo "Migration task: $task_arn"
+
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$task_arn"
+
+          # The wait only says the task finished. Whether the migration
+          # succeeded is the container's exit code, and a failed migration
+          # allowed to look like a success is how a service ends up deployed
+          # against a schema it does not have.
+          exit_code=$(aws ecs describe-tasks \
+            --cluster "$CLUSTER" --tasks "$task_arn" \
+            --query 'tasks[0].containers[0].exitCode' --output text)
+
+          stopped_reason=$(aws ecs describe-tasks \
+            --cluster "$CLUSTER" --tasks "$task_arn" \
+            --query 'tasks[0].stoppedReason' --output text)
+
+          echo "Exit code $exit_code ($stopped_reason)"
+
+          if [ "$exit_code" != "0" ]; then
+            echo "::error::prisma migrate deploy exited with $exit_code. No service has been moved to the new revision; the previous one is still serving. Task: $task_arn"
+            exit 1
+          fi
+
+  # --- Release --------------------------------------------------------------
+  # Two jobs rather than a matrix, because the two services fail differently
+  # and are not interchangeable. The API is the one coupled to the schema and
+  # goes first: if it will not stabilise there is no point shipping a client
+  # that talks to it.
+  deploy-api:
+    name: Deploy the API
+    runs-on: ubuntu-latest
+    needs: [build, migrate]
+    environment: production
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: pulsara-deploy-api-${{ github.run_id }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # The revision the migration ran from, so the running code and the schema
+      # it expects were never two separate decisions. `--force-new-deployment`
+      # is belt and braces: the revision is already new, but it also covers a
+      # manual re-run where the image tag has not changed and ECS would
+      # otherwise consider the service up to date and do nothing.
+      - name: Update the service
+        env:
+          CLUSTER: ${{ vars.ECS_CLUSTER }}
+          SERVICE: ${{ vars.ECS_SERVICE_API }}
+          TASK_DEFINITION: ${{ needs.migrate.outputs.api-task-definition }}
+        run: |
+          set -euo pipefail
+          aws ecs update-service \
+            --cluster "$CLUSTER" \
+            --service "$SERVICE" \
+            --task-definition "$TASK_DEFINITION" \
+            --force-new-deployment \
+            --query 'service.deployments[0].{status: status, taskDefinition: taskDefinition}' \
+            --output json
+
+      # Without this the job goes green the moment ECS accepts the request,
+      # which says nothing about whether a single new task ever passed its
+      # health check. Waiting is what makes a bad release fail here rather than
+      # in somebody's inbox.
+      - name: Wait for the service to stabilise
+        env:
+          CLUSTER: ${{ vars.ECS_CLUSTER }}
+          SERVICE: ${{ vars.ECS_SERVICE_API }}
+        run: |
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
+
+      # One last check from outside the VPC that the thing actually serves.
+      # /api/health is the liveness endpoint the container's own HEALTHCHECK
+      # uses; it deliberately does not touch the database, so this asks whether
+      # the process is up, not whether the whole system is well.
+      - name: Check the published health endpoint
+        if: vars.PRODUCTION_API_URL != ''
+        env:
+          API_URL: ${{ vars.PRODUCTION_API_URL }}
+        run: |
+          set -uo pipefail
+          for attempt in 1 2 3 4 5; do
+            if curl --fail --silent --show-error --max-time 10 "$API_URL/api/health"; then
+              echo "Healthy."
+              exit 0
+            fi
+            echo "Attempt $attempt failed; retrying in 10s."
+            sleep 10
+          done
+          echo "::error::The API did not answer /api/health after the deployment."
+          exit 1
+
+  deploy-web:
+    name: Deploy the client
+    runs-on: ubuntu-latest
+    needs: [build, deploy-api]
+    environment: production
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: pulsara-deploy-web-${{ github.run_id }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Read the current task definition
+        env:
+          FAMILY: ${{ vars.ECS_TASK_FAMILY_WEB }}
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition "$FAMILY" \
+            --query 'taskDefinition' \
+            --output json > web-task-definition.json
+
+      - name: Point it at the new image
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: web-task-definition.json
+          container-name: ${{ vars.ECS_CONTAINER_WEB }}
+          image: ${{ needs.build.outputs.web-image }}
+
+      - name: Deploy and wait
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          cluster: ${{ vars.ECS_CLUSTER }}
+          service: ${{ vars.ECS_SERVICE_WEB }}
+          force-new-deployment: true
+          wait-for-service-stability: true

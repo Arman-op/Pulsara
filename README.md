@@ -276,6 +276,100 @@ build; a change that adds some raises the bar for the next one.
 
 ---
 
+## Deployment
+
+`.github/workflows/deploy.yml` releases to AWS on every push to `main`, and can
+be re-run by hand from the Actions tab. It builds both images and pushes them to
+ECR tagged with the commit SHA, applies pending Prisma migrations, moves the ECS
+API service onto the new revision, waits for it to stabilise, then does the same
+for the client.
+
+Migrations run as a **one-off ECS task from the same task-definition revision
+that is about to serve traffic** — same image, same secrets, same subnets —
+rather than from the GitHub runner. That keeps one configuration instead of two,
+and means the production database needs no public route into it.
+
+### No AWS access keys
+
+The workflow authenticates with **GitHub Actions OIDC**. There is no
+`AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` anywhere in this repository or
+its secrets. GitHub mints a short-lived token describing the repository, ref and
+workflow, and an IAM role decides whether to trust it.
+
+Create the provider once per AWS account:
+
+```bash
+aws iam create-open-id-connect-provider \
+  --url https://token.actions.githubusercontent.com \
+  --client-id-list sts.amazonaws.com
+```
+
+Then a role whose trust policy names this repository and, importantly, the
+branch — without the `sub` condition any workflow in any repository could assume
+it:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::<account-id>:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+          "token.actions.githubusercontent.com:sub": "repo:<owner>/<repo>:ref:refs/heads/main"
+        }
+      }
+    }
+  ]
+}
+```
+
+The role needs ECR push, `ecs:RegisterTaskDefinition`, `ecs:RunTask`,
+`ecs:UpdateService`, `ecs:DescribeTaskDefinition`, `ecs:DescribeTasks`,
+`ecs:DescribeServices`, and `iam:PassRole` scoped to the task execution and task
+roles.
+
+### What to configure
+
+One secret, on the `production` environment:
+
+| Secret | Description |
+| :--- | :--- |
+| `AWS_DEPLOY_ROLE_ARN` | The role above |
+
+Everything else is a repository variable, because none of it is secret:
+
+| Variable | Description |
+| :--- | :--- |
+| `AWS_REGION` | Region holding the registry and the cluster |
+| `ECR_REPOSITORY_API` / `ECR_REPOSITORY_WEB` | ECR repository names |
+| `ECS_CLUSTER` | Cluster name |
+| `ECS_SERVICE_API` / `ECS_SERVICE_WEB` | Service names |
+| `ECS_TASK_FAMILY_API` / `ECS_TASK_FAMILY_WEB` | Task-definition families |
+| `ECS_CONTAINER_API` / `ECS_CONTAINER_WEB` | Container names inside those definitions |
+| `ECS_SUBNET_IDS` | Comma-separated subnets for the migration task |
+| `ECS_SECURITY_GROUP_IDS` | Comma-separated security groups for it |
+| `VITE_API_URL` | Origin the published client talks to (inlined at build time) |
+| `VITE_FIREBASE_*` | Optional; enables Google sign-in in the published bundle |
+| `PRODUCTION_API_URL` | Optional; if set, the deploy checks `/api/health` afterwards |
+
+Application secrets — `DATABASE_URL`, the JWT secrets, the Firebase service
+account, the GitHub App key — are **not** passed by this workflow. They belong
+in AWS Secrets Manager and are referenced by the task definition's `secrets`
+block, so they are never in a GitHub log, a workflow file, or an image layer.
+
+> **Not verified.** This pipeline has never been run. Doing so needs an AWS
+> account with a registry, a cluster, two services and the role above; this
+> repository has none of that. The workflow is a reviewable design for a
+> release, not something anybody has watched go green.
+
+---
+
 ## Monitoring
 
 Pulsara exposes itself the way it expects other systems to: `GET /metrics`
@@ -575,8 +669,11 @@ against a real repository token. Both are covered by tests that stub exactly one
 function each, so everything Pulsara itself does is exercised — but nobody has
 watched either work end to end, and this README is not going to claim otherwise.
 
-Container images, a working `docker compose` stack and GitHub Actions CI are in
-place. [ARCHITECTURE.md](./ARCHITECTURE.md) tracks the current state precisely.
+Container images, a working `docker compose` stack, GitHub Actions CI and an
+OIDC-authenticated release workflow are in place — the last of those written but
+never run, for want of an AWS account.
+[ARCHITECTURE.md](./ARCHITECTURE.md) tracks the current state precisely,
+including what has not been verified.
 
 ---
 
