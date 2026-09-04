@@ -128,7 +128,9 @@ frontend/
       settings/            Profile, security, sessions, integrations
       notfound/            404 inside the app shell
 
-.github/workflows/ci.yml  Format, lint, typecheck, test, build, publish
+e2e/                      Playwright: a real browser against the real stack
+scripts/audit.mjs         Dependency gate, with a justified allowlist
+.github/workflows/ci.yml  Format, lint, audit, typecheck, test, build, publish
 backend/Dockerfile        Multi-stage; runs as the unprivileged `node` user
 frontend/Dockerfile       Multi-stage; nginx-unprivileged on 8080
 frontend/nginx.conf       SPA fallback and asset cache policy
@@ -1083,6 +1085,53 @@ out". The component tests assert the product's central honesty rule: that an
 unmeasured value renders as an em dash, and that a failed request renders as an
 error rather than as a healthy fleet.
 
+### The browser suite covers what neither side can
+
+`e2e/` drives a real Chromium against a real API and a real database. The other
+two suites each test one side of a boundary — Express against PostgreSQL with no
+browser, React against a stubbed `fetch` with no server — and neither would
+notice if the two sides disagreed. A refresh cookie the browser declines to
+store, a CORS origin that does not match, a WebSocket handshake the client
+authenticates differently from how the server expects: each passes every unit
+test and fails a user.
+
+Playwright starts both servers itself, against a database of its own that the
+global setup creates, migrates and seeds through `prisma/seed.ts` — the same
+bootstrap a developer runs, rather than a private arrangement that exists only
+for the tests. Probing is switched off there deliberately, which puts the
+catalogue in the state the original dashboard papered over: services registered,
+nothing observed. The correct render is an em dash, and the suite says so.
+
+The flow that matters most ends with a CPU figure that changes. Seeing it move
+proves the whole path at once: a token held only in memory authenticated a
+socket handshake, the server accepted it, and the collector published a genuine
+`systeminformation` reading.
+
+There is no Prisma client in that package. The generated client belongs to the
+schema it came from, and a second copy would let a schema change leave the
+browser suite talking to a client that no longer matches the database under it —
+so the setup shells into the backend and uses its.
+
+### Coverage is a floor, not a target
+
+Both packages fail CI below a threshold set just under what the suite currently
+reaches. That makes it a ratchet: a change that removes coverage fails, and a
+change that adds it raises the bar for the next one. Set at an aspirational
+figure instead, a threshold fails on unrelated work until somebody lowers it,
+and a threshold lowered twice teaches everybody it means nothing.
+
+The API sits at roughly 77% of lines and the client at roughly 44%, and the gap
+is not an oversight. Most of the client is markup: the modules where a mistake is
+possible — the request client, the route guard, the session store — are above
+90%, while five list screens are largely JSX and are covered by the browser
+suite instead. Chasing the number through that JSX would add assertions about
+class names and produce a better percentage with no better software.
+
+It is worth saying plainly what the figure is not. Coverage records that a line
+ran, not that anything checked what it did. The suites it guards assert
+behaviour against a real database and a real browser precisely because a
+percentage cannot.
+
 ---
 
 ## 15. Packaging and delivery
@@ -1124,31 +1173,48 @@ wrong API.
 
 ### Compose
 
-`docker compose up -d` starts only PostgreSQL, because that is what a developer
-running `npm run dev` needs, and because the default path must not fail on a
-clean checkout. The application containers sit behind an `app` profile and read
-`backend/.env`, which is not in the repository.
+`docker compose up -d` starts the backing services only — PostgreSQL and Redis
+— because that is what a developer running `npm run dev` needs, and because the
+default path must not fail on a clean checkout. The application containers sit
+behind an `app` profile and read `backend/.env`, which is not in the repository.
 
-There is no Redis service. Nothing in the system uses one: rate limiting is
-in-process, the realtime transport is a single Socket.IO server, and every
-derived figure is computed in PostgreSQL on read. A cache with nothing to cache
-is infrastructure to maintain and nothing to show for it; it goes in when there
-is a measurement that says it should.
+Both publish on shifted ports, 5433 and 6380, rather than the defaults. A
+developer with a native PostgreSQL or Redis already bound is common, and a
+silent port clash produces a failure that points everywhere except at the cause.
+
+Redis is there because two things use it: the probe queue, which makes the sweep
+singular across replicas rather than multiplying probes by replica count, and
+the read cache in front of the two endpoints that cost real work. It is capped
+at 256 MB with `allkeys-lru`, because everything in it is a cache entry or a
+transient job and nothing is a record of anything — an unbounded Redis that
+fills starts refusing writes, and that would take the probe queue down with it.
+It stays optional: without `REDIS_URL` the API probes on an in-process timer and
+reads go straight to PostgreSQL, which is the correct behaviour for a single
+instance.
 
 ### CI
 
-Three jobs. API and Web each run format, lint, typecheck, tests and build, in
+Four jobs, in `.github/workflows/ci.yml`, on every push and every pull request.
+
+**API** and **Web** each run format, lint, audit, typecheck, tests and build, in
 that order — cheapest first, so an obvious failure is reported in seconds rather
 than after a database has been migrated. The API job runs its integration suite
-against a PostgreSQL service container, with a health-command so the first
-migration does not race the database's own start-up.
+against PostgreSQL and Redis service containers, both with a health-command so
+the first migration does not race the database's own start-up. It runs that
+suite under coverage rather than plain, because the thresholds are a ratchet: a
+change that removes coverage has to fail here, not be noticed a release later.
 
-The image job builds both images on every run, so a broken Dockerfile fails the
-pull request that caused it, and pushes to GHCR only from the default branch. A
-pull request from a fork has a read-only token; it must not be able to publish a
-tag that a deployment might pull, and it does not even attempt the registry
-login, because a failure there would fail the job for a reason unrelated to the
-change under review.
+**End to end** installs all three packages, because Playwright starts the real
+API and the real client itself, then runs Chromium against them. On failure, and
+only on failure, it uploads the trace: a passing run should leave nothing
+behind, and a trace is what makes a failure diagnosable without reproducing it.
+
+**Images** builds both Dockerfiles on every run, so a broken Dockerfile fails
+the pull request that caused it rather than the release three days later, and
+pushes to GHCR only from the default branch. A pull request from a fork has a
+read-only token; it must not be able to publish a tag that a deployment might
+pull, and it does not even attempt the registry login, because a failure there
+would fail the job for a reason unrelated to the change under review.
 
 ---
 

@@ -259,14 +259,20 @@ variable.
 
 | Job | What it does |
 | :--- | :--- |
-| API | Prettier, ESLint, `tsc`, unit tests, integration tests against a real PostgreSQL service container, build |
-| Web | Prettier, ESLint, `tsc`, Vitest, production build |
-| Images | Builds both images; pushes them to GHCR only from `main` |
+| API | Prettier, ESLint, `npm audit`, `tsc`, unit tests, integration tests under coverage against real PostgreSQL and Redis service containers, build |
+| Web | Prettier, ESLint, `npm audit`, `tsc`, Vitest under coverage, production build |
+| End to end | Installs all three packages, then runs the Playwright suite in Chromium against the real API and the real client; uploads a trace on failure |
+| Images | `docker build` for both images; pushes them to GHCR only from `main` |
 
 Images are built on every run so a broken Dockerfile fails the pull request that
 caused it, but published only from the default branch — a fork's pull request
 must never be able to publish a tag a deployment might pull. Set the repository
 variable `VITE_API_URL` to the origin the published client should talk to.
+
+Coverage runs in CI rather than being reported by hand, and the thresholds in
+`backend/vitest.config.ts` and `frontend/vite.config.ts` are floors set just
+under what the suites reach today. A change that removes coverage fails the
+build; a change that adds some raises the bar for the next one.
 
 ---
 
@@ -382,10 +388,19 @@ automatically. Thresholds are per resource; see `backend/.env.example`.
 | `npm test` | Unit and integration suites |
 | `npm run test:unit` | Pure logic only; needs no database |
 | `npm run test:integration` | Real HTTP against a real PostgreSQL and Redis |
+| `npm run test:coverage` | Both suites, with the CI coverage floor enforced |
 | `npm run db:migrate` | Create/apply a migration in development |
 | `npm run db:deploy` | Apply pending migrations (production) |
 | `npm run db:seed` | First admin + service catalogue |
 | `npm run db:studio` | Prisma Studio |
+
+### `e2e/`
+
+| Command | Purpose |
+| :--- | :--- |
+| `npm run install:browsers` | Download Chromium (once) |
+| `npm test` | Start both servers and drive a real browser |
+| `npm run test:headed` | The same, with the browser visible |
 
 ### `frontend/`
 
@@ -398,6 +413,7 @@ automatically. Thresholds are per resource; see `backend/.env.example`.
 | `npm run lint` | ESLint |
 | `npm run format` | Prettier |
 | `npm test` | Vitest with jsdom and Testing Library |
+| `npm run test:coverage` | The same, with the CI coverage floor enforced |
 
 ---
 
@@ -406,9 +422,19 @@ automatically. Thresholds are per resource; see `backend/.env.example`.
 ```bash
 cd backend  && npm run test:unit   # no infrastructure required
 docker compose up -d               # PostgreSQL and Redis, for the integration suite
-cd backend  && npm test
-cd frontend && npm test
+cd backend  && npm run test:coverage
+cd frontend && npm run test:coverage
+
+cd e2e && npm ci && npm run install:browsers
+npm test                           # starts both servers itself
 ```
+
+| Suite | What it drives | Count |
+| :--- | :--- | ---: |
+| `backend/tests/unit` | Pure decision logic, no infrastructure | 52 |
+| `backend/tests/integration` | Real Express over HTTP, real PostgreSQL and Redis | 204 |
+| `frontend/src/**/*.test.tsx` | React in jsdom, `fetch` stubbed | 55 |
+| `e2e` | Real Chromium against the real stack | 6 |
 
 The backend integration suite runs against a real PostgreSQL database rather
 than a mocked Prisma client, because every guarantee worth testing here lives in
@@ -421,9 +447,24 @@ It creates and migrates a `pulsara_test` database on first run, and refuses to
 run against any database whose name does not end in `_test` — it truncates every
 table between cases. Override the target with `TEST_DATABASE_URL`.
 
-The cache and probe-queue suites need Redis, for the same reason: what is worth
-testing there — that invalidation actually deletes, that two schedulers do not
-double-probe — is behaviour of the broker, not of the code calling it. Override
+The browser suite covers what neither of the others can. The API tests have no
+browser and the component tests have no server, so neither would notice the two
+sides disagreeing — a refresh cookie the browser declines to store, a CORS origin
+that does not match, a socket handshake authenticated differently at each end.
+Playwright starts both servers itself against a database of its own, so it runs
+from a clean checkout with only Docker up. Its central assertion is a CPU figure
+that *changes*: a token held only in memory authenticated a socket handshake, the
+server accepted it, and a real `systeminformation` reading arrived.
+
+Coverage thresholds are enforced in CI and set just below what the suites reach,
+so they ratchet upward rather than becoming something to lower. The client's
+figure is lower than the API's on purpose — its logic-carrying modules are above
+90%, and five list screens are mostly JSX covered by the browser suite instead.
+
+The cache and probe-queue suites need Redis, for the same reason the rest need
+PostgreSQL: what is worth testing there — that invalidation actually deletes,
+that two schedulers do not double-probe — is behaviour of the broker, not of the
+code calling it. Override
 with `TEST_REDIS_URL`.
 
 ---
