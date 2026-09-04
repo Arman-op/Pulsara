@@ -294,55 +294,45 @@ and means the production database needs no public route into it.
 The workflow authenticates with **GitHub Actions OIDC**. There is no
 `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` anywhere in this repository or
 its secrets. GitHub mints a short-lived token describing the repository, ref and
-workflow, and an IAM role decides whether to trust it.
+workflow that asked for it, and an IAM role decides whether to trust it.
 
-Create the provider once per AWS account:
-
-```bash
-aws iam create-open-id-connect-provider \
-  --url https://token.actions.githubusercontent.com \
-  --client-id-list sts.amazonaws.com
-```
-
-Then a role whose trust policy names this repository and, importantly, the
-branch — without the `sub` condition any workflow in any repository could assume
-it:
+Both the identity provider and the role are declared in [`infra/`](./infra) —
+`infra/iam.tf` — so this is not a console click somebody has to remember. The
+condition that matters is the `sub`:
 
 ```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "Federated": "arn:aws:iam::<account-id>:oidc-provider/token.actions.githubusercontent.com"
-      },
-      "Action": "sts:AssumeRoleWithWebIdentity",
-      "Condition": {
-        "StringEquals": {
-          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-          "token.actions.githubusercontent.com:sub": "repo:<owner>/<repo>:ref:refs/heads/main"
-        }
-      }
-    }
-  ]
+"Condition": {
+  "StringEquals": {
+    "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+    "token.actions.githubusercontent.com:sub": "repo:<owner>/<repo>:ref:refs/heads/main"
+  }
 }
 ```
 
-The role needs ECR push, `ecs:RegisterTaskDefinition`, `ecs:RunTask`,
-`ecs:UpdateService`, `ecs:DescribeTaskDefinition`, `ecs:DescribeTasks`,
-`ecs:DescribeServices`, and `iam:PassRole` scoped to the task execution and task
-roles.
+Without it, the provider vouches only that the token came from GitHub Actions —
+not that it came from *this* repository — and any workflow anywhere could assume
+the role. The policy attached to it grants ECR push, the ECS calls the release
+makes, and `iam:PassRole` restricted to the two task roles and to
+`ecs-tasks.amazonaws.com`, because naming a role is a form of using one and an
+unrestricted `PassRole` is the standard way out of a deployment role.
 
 ### What to configure
 
-One secret, on the `production` environment:
+Two secrets:
 
 | Secret | Description |
 | :--- | :--- |
-| `AWS_DEPLOY_ROLE_ARN` | The role above |
+| `AWS_DEPLOY_ROLE_ARN` | The release role above, on the `production` environment |
+| `AWS_TERRAFORM_PLAN_ROLE_ARN` | The read-only role the infrastructure workflow plans with |
 
-Everything else is a repository variable, because none of it is secret:
+Everything else is a repository variable, because none of it is secret — and
+none of it needs typing out, because Terraform prints it:
+
+```bash
+cd infra
+terraform output -json github_actions_variables |
+  jq -r 'to_entries[] | "gh variable set \(.key) --body \"\(.value)\""'
+```
 
 | Variable | Description |
 | :--- | :--- |
@@ -357,16 +347,54 @@ Everything else is a repository variable, because none of it is secret:
 | `VITE_API_URL` | Origin the published client talks to (inlined at build time) |
 | `VITE_FIREBASE_*` | Optional; enables Google sign-in in the published bundle |
 | `PRODUCTION_API_URL` | Optional; if set, the deploy checks `/api/health` afterwards |
+| `TF_STATE_BUCKET` / `TF_STATE_KEY` | Where the Terraform state lives, for the plan job |
+| `PRODUCTION_DOMAIN_NAME` / `ROUTE53_ZONE_ID` | Passed to `terraform plan` as variables |
 
 Application secrets — `DATABASE_URL`, the JWT secrets, the Firebase service
 account, the GitHub App key — are **not** passed by this workflow. They belong
 in AWS Secrets Manager and are referenced by the task definition's `secrets`
 block, so they are never in a GitHub log, a workflow file, or an image layer.
 
-> **Not verified.** This pipeline has never been run. Doing so needs an AWS
-> account with a registry, a cluster, two services and the role above; this
-> repository has none of that. The workflow is a reviewable design for a
-> release, not something anybody has watched go green.
+> **Not verified.** This pipeline has never been run. Doing so needs the AWS
+> account [`infra/`](./infra) describes, and this repository has none. The
+> workflow is a reviewable design for a release, not something anybody has
+> watched go green.
+
+---
+
+## Infrastructure
+
+[`infra/`](./infra) is Terraform for the account all of the above assumes: a VPC
+across two availability zones, an ECS Fargate cluster running the two services,
+an Application Load Balancer terminating HTTPS on an ACM certificate, RDS
+PostgreSQL and ElastiCache Redis in private subnets, ECR repositories, and the
+Secrets Manager entries the tasks read at start-up.
+
+Public subnets hold exactly one thing: the load balancer. Everything else — both
+services, the database, the cache — sits in private subnets with no inbound
+route, so the reachable surface of the deployment is two ports. There is no
+bastion; migrations run as a one-off task on the API's own security group, and a
+shell in a running container is ECS Exec.
+
+The names the release workflow needs are Terraform outputs rather than something
+to copy by hand, which is what stops a release pointing at a cluster that no
+longer exists.
+
+`.github/workflows/infra.yml` runs `fmt`, `validate` and a **`terraform plan`**
+on every pull request touching `infra/`. Nothing applies on its own: no push,
+merge or schedule reaches the apply job, which needs a manual dispatch *and* an
+approval from the `infrastructure` environment's reviewers. The role it assumes
+is deliberately not declared in the configuration it applies — creating IAM
+roles is indistinguishable from administrator access, and a configuration that
+declares the role used to apply it is a loop with an account takeover in the
+middle.
+
+[infra/README.md](./infra/README.md) has the bootstrap order, and a table of
+every choice with a price attached — single NAT gateway, Multi-AZ, Spot,
+Graviton — with what each one costs and what it buys.
+
+> **Not verified**, in the same sense as the release workflow: it formats,
+> initialises and validates in CI, but no `terraform apply` has ever run.
 
 ---
 
@@ -669,9 +697,10 @@ against a real repository token. Both are covered by tests that stub exactly one
 function each, so everything Pulsara itself does is exercised — but nobody has
 watched either work end to end, and this README is not going to claim otherwise.
 
-Container images, a working `docker compose` stack, GitHub Actions CI and an
-OIDC-authenticated release workflow are in place — the last of those written but
-never run, for want of an AWS account.
+Container images, a working `docker compose` stack, GitHub Actions CI, an
+OIDC-authenticated release workflow and Terraform for the account it deploys to
+are in place — the last two written and validated but never run, for want of an
+AWS account.
 [ARCHITECTURE.md](./ARCHITECTURE.md) tracks the current state precisely,
 including what has not been verified.
 

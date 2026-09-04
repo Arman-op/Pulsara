@@ -128,13 +128,30 @@ frontend/
       settings/            Profile, security, sessions, integrations
       notfound/            404 inside the app shell
 
+infra/                    Terraform for the AWS account this deploys to
+  network.tf              VPC, subnets, NAT, route tables, VPC endpoints
+  security-groups.tf      Rules written against security groups, not CIDRs
+  alb.tf                  Load balancer, target groups, path routing
+  dns.tf                  ACM certificate, DNS validation, alias records
+  ecs.tf                  Cluster and the two service instantiations
+  modules/ecs-service/    Log group, task definition, service, autoscaling
+  database.tf             RDS PostgreSQL
+  cache.tf                ElastiCache Redis
+  ecr.tf                  Both repositories and their lifecycle policies
+  secrets.tf              Secrets Manager entries and the injection list
+  iam.tf                  Task roles, the GitHub OIDC provider, deploy role
+  outputs.tf              What the release workflow needs, in the shape it needs
+
 e2e/                      Playwright: a real browser against the real stack
 scripts/audit.mjs         Dependency gate, with a justified allowlist
-.github/workflows/ci.yml  Format, lint, audit, typecheck, test, build, publish
+.github/workflows/
+  ci.yml                  Format, lint, audit, typecheck, test, build, publish
+  deploy.yml              Build, migrate, deploy to ECS over OIDC
+  infra.yml               terraform fmt, validate and plan on infra/ changes
 backend/Dockerfile        Multi-stage; runs as the unprivileged `node` user
 frontend/Dockerfile       Multi-stage; nginx-unprivileged on 8080
 frontend/nginx.conf       SPA fallback and asset cache policy
-docker-compose.yml        PostgreSQL by default; the stack behind `--profile app`
+docker-compose.yml        PostgreSQL and Redis; the stack behind `--profile app`
 ```
 
 Modules are grouped by **domain**, not by technical layer. A change to how
@@ -1266,6 +1283,77 @@ names, subnets, security groups — is a repository variable, and the role ARN i
 the single secret. The `production` GitHub environment gates the run, so a
 release that is not allowed to proceed cannot read the credentials either.
 
+### Infrastructure as code
+
+`infra/` is Terraform for the account the release workflow deploys into. It
+exists for the same reason the environment schema does: an arrangement that
+lives only in somebody's console clicks is an arrangement nobody can review, and
+one that cannot be rebuilt after it is deleted.
+
+**Public subnets hold exactly one thing.** The load balancer. Both services, the
+database and the cache are in private subnets with no inbound route from the
+internet, so the reachable surface of the entire deployment is two ports on the
+ALB. That is affordable rather than merely aspirational because the two things
+that would normally force a hole — running migrations and getting a shell —
+both have answers that do not: migrations run as a one-off ECS task on the API's
+own security group, and a shell is ECS Exec, authorised by IAM and logged in
+CloudTrail, rather than an SSH host standing permanently in a public subnet.
+
+**Every rule names a security group, not a CIDR.** "The database accepts
+connections from the API tasks" stays true when somebody later puts something
+else in that subnet; "the database accepts connections from 10.20.16.0/20" does
+not. The data stores have no egress rules at all, which is correct — PostgreSQL
+and Redis answer connections, they do not make them. The API's egress is
+deliberately unrestricted, because service health checks probe whatever URL
+somebody registered and that is the feature.
+
+**One hostname, split by path.** `/api/*` and `/socket.io/*` go to the API,
+everything else to the client. Serving both from one origin removes cross-site
+cookies and CORS from production entirely: the refresh cookie is first-party, so
+it needs no `SameSite=None`, and browsers tightening third-party cookie
+behaviour get no say in whether sessions survive.
+
+**Secrets are references, not values.** The task definition carries ARNs; the
+ECS agent resolves them with the execution role before the container starts, so
+no credential is in the task-definition JSON, in `describe-task-definition`
+output, or in the console. The distinction that matters is between the secrets
+Terraform generates — the database password, the two signing keys, the Redis
+auth token, none of which exist outside this deployment — and the ones it
+creates empty. The Firebase service account and the GitHub App key are issued by
+somebody else, and a value that passes through Terraform is a value in the state
+file and in every plan that ever touched it, so Terraform makes the container
+and a person puts the value in.
+
+**Two fields Terraform deliberately does not own.** `aws_ecs_service` ignores
+changes to `task_definition` and `desired_count`. The release workflow registers
+a revision per commit and the autoscaling policy sets the running count; without
+those two lines, an apply triggered by an unrelated change would roll production
+back to whatever image tag a variable happens to name and reset a scaled-out
+fleet to its minimum. Declaring who owns a field is what stops two systems
+fighting over it.
+
+**The sticky-session admission.** Socket.IO opens with HTTP long-polling and
+only then upgrades, so with several API tasks and no shared adapter the
+handshake and the poll after it must reach the same one. The API target group is
+therefore sticky. That is a workaround, not a design: the right fix is the
+Socket.IO Redis adapter, the cache is already there, and it is a change to the
+application rather than to a load-balancer setting.
+
+**There is no apply job in CI.** `.github/workflows/infra.yml` runs `fmt`,
+`validate` and `plan` on pull requests that touch `infra/`, and stops. Applying
+this configuration creates IAM roles and attaches policies to them, which is
+indistinguishable from administrator access — a role able to do it can grant
+itself anything, and making one assumable by a workflow would put account
+takeover one merge away. The plan is also not saved with `-out`: a plan file
+contains the resource attributes the state does, including the generated
+database password, and the rendered text redacts them only because Terraform
+marks them sensitive.
+
+The defaults are chosen for a portfolio deployment and say so: one NAT gateway
+rather than one per zone, single-AZ RDS, on-demand Fargate rather than Spot.
+`infra/README.md` tabulates each with what it costs and what it buys, because a
+cost decision recorded as a bare value is a decision nobody can revisit.
+
 ---
 
 ## 16. Dependencies and advisories
@@ -1332,6 +1420,7 @@ kind of call a person should make rather than a bot.
 | Automated tests | Implemented |
 | Container images and CI | Implemented |
 | Deployment pipeline (ECR, migrations, ECS) | Written, **not verified** |
+| Infrastructure as code (Terraform) | Written and validated, **not applied** |
 | Google sign-in verified against a live Firebase project | **Not verified** |
 | GitHub polling verified against a live repository | **Not verified** |
 
@@ -1347,11 +1436,16 @@ HTTP client — so everything the application itself does is exercised. Neither
 has been run against a real Firebase project or a real GitHub token, because
 this repository has no credentials for either.
 
-`deploy.yml` is in the same position, and more so. Its YAML parses, the actions
-it calls are the current major versions, and each step is the operation it
-claims to be — but no run of it has ever happened, because that needs an AWS
-account with an ECR registry, an ECS cluster, two services, task definitions and
-an IAM role trusting this repository's OIDC subject. Read it as a reviewable
-design for a release, not as a pipeline anybody has watched go green. Saying
-"works" of something nobody has watched work would be the same species of claim
-this project was built to remove.
+`deploy.yml` and `infra/` are in the same position, and more so. The workflow's
+YAML parses and the actions it calls are current major versions; the Terraform
+formats, initialises and validates against the real AWS provider, and CI checks
+all three on every change. But no run of either has happened, because that needs
+an AWS account, and `terraform validate` proves a configuration is internally
+consistent, not that AWS will accept it — a quota, an unsupported instance class
+in a region, an IAM condition key that does not apply to a service, none of
+those show up until an apply.
+
+So: read them as a reviewable design for a release and the account it runs in,
+not as something anybody has watched go green. Saying "works" of something
+nobody has watched work would be the same species of claim this project was
+built to remove.
