@@ -1,14 +1,112 @@
 # Pulsara
 
-Real-time infrastructure intelligence for the people who get paged.
+Real-time infrastructure intelligence — and the first thing it monitors is
+itself.
 
-Pulsara consolidates host telemetry, service reachability, CI/CD deployments and
-incident state into one console. It is built on a single rule: **the UI never
-shows a value the system did not actually observe.** An unreachable API looks
-different from a healthy fleet, and a service with no measurements says so.
+Pulsara watches the host its API runs on, probes the services it has been given
+URLs for, mirrors a real GitHub repository's Actions runs, and opens incidents
+when any of those go wrong. One rule holds the whole thing together: **the UI
+never shows a value the system did not actually observe.** A service nobody has
+probed yet renders an em dash, not a plausible percentage.
 
-For the design rationale behind every decision below, see
-[ARCHITECTURE.md](./ARCHITECTURE.md).
+That rule is the point of the project. This began as a dashboard that looked
+production-grade and was fed by `Math.random()` — invented CPU curves, a static
+array of pipelines, seeded incidents with no cause, and a login that accepted
+any email address paired with the password `password`. Every one of those has
+been replaced by something that measures. What remains is smaller than the demo
+pretended to be, and all of it is real.
+
+---
+
+## What it actually monitors
+
+**The host the API runs on.** `systeminformation` reads real CPU, memory, disk,
+load and network counters every two seconds — in a container, that container's
+view of them. Every sample streams to the browser over an authenticated
+WebSocket; the mean of each thirty-second window is what reaches the database,
+because persisting every sample produced a quarter of a million rows a day to
+draw a chart that re-buckets them on read anyway.
+
+**Services it can reach.** Anything with an HTTP health-check URL. A scheduled
+worker records status and response time, and uptime and latency percentiles are
+derived from that stored history on read — never stored as a figure somebody
+could set to 99.9%.
+
+**A real GitHub repository.** `GITHUB_MONITORED_REPO` names it, and it is
+connected and backfilled at start-up, so the Pipelines page has real content on
+first boot. Signed webhooks keep it fresh; a reconciling poll keeps it correct
+when a delivery is missed. Without a credential configured, that page says it is
+not connected rather than showing invented rows.
+
+**Itself, when something is wrong.** Sustained CPU, memory or disk pressure; a
+service failing its checks; a failing workflow on the monitored repository's
+default branch. Each opens a real incident with a timeline, escalates it if the
+condition persists, and resolves it when the condition clears. People can open
+incidents by hand too, and every state transition writes an audit row naming who
+did it.
+
+**What it is not:** a fleet manager. It watches one host — the one it is running
+on — plus whatever endpoints somebody registered. Pointed at a Kubernetes
+cluster it would tell you nothing, and it does not pretend otherwise.
+
+---
+
+## How it fits together
+
+```mermaid
+graph LR
+    subgraph browser["Browser"]
+        SPA["React 19 SPA"]
+    end
+
+    subgraph api["API process · Node 22"]
+        HTTP["Express 5<br/>REST + /metrics"]
+        WS["Socket.IO"]
+        COL["Host collector<br/>every 2s"]
+        ENG["Alert engines"]
+        SYNC["GitHub sync"]
+    end
+
+    subgraph data["State"]
+        DB[("PostgreSQL 16")]
+        REDIS[("Redis")]
+    end
+
+    HOST["The host<br/>CPU · memory · disk"]
+    SVC["Registered<br/>health-check URLs"]
+    GH["GitHub Actions"]
+    PROM["Prometheus"]
+
+    SPA -->|"REST, Bearer token"| HTTP
+    WS -.->|"live samples"| SPA
+
+    HOST --> COL
+    COL --> WS
+    COL -->|"30s window mean"| DB
+    COL --> ENG
+
+    REDIS -->|"probe jobs"| SVC
+    SVC -->|"status + latency"| DB
+    SVC --> ENG
+
+    GH -->|"signed webhook"| HTTP
+    SYNC <-->|"reconciling poll"| GH
+    SYNC --> DB
+    SYNC --> ENG
+
+    ENG -->|"open · escalate · resolve"| DB
+    HTTP <--> DB
+    HTTP <-->|"read cache"| REDIS
+    PROM -->|"scrape"| HTTP
+```
+
+Everything on the left of that diagram is a measurement. Nothing on the right is
+a value the system made up.
+
+For the reasoning behind each decision — why a GitHub App rather than a token,
+why Fargate rather than EC2 or EKS, why Redis carries both a queue and a cache —
+see [ARCHITECTURE.md](./ARCHITECTURE.md). For what to do when something breaks,
+see [RUNBOOK.md](./RUNBOOK.md).
 
 ---
 
@@ -19,8 +117,13 @@ For the design rationale behind every decision below, see
 | Client | React 19, Vite 6, TypeScript, Tailwind CSS, Zustand, Recharts |
 | API | Node 22, Express 5, TypeScript, Socket.IO |
 | Data | PostgreSQL 16 via Prisma (versioned migrations) |
+| Queue and cache | Redis 7 via BullMQ — distributed probe scheduling, read-through cache |
 | Auth | Argon2id passwords + optional Google sign-in via Firebase; rotating refresh tokens |
-| Tooling | ESLint (type-aware), Prettier, Zod-validated environment |
+| Telemetry | `systeminformation` host counters, Prometheus exposition via `prom-client` |
+| Observability | pino structured logs with request-id correlation |
+| Tests | Vitest + Supertest against a real PostgreSQL, React Testing Library, Playwright |
+| Delivery | Multi-stage Docker images, GitHub Actions CI and OIDC release, Terraform on ECS Fargate |
+| Tooling | ESLint (type-aware), Prettier, Zod-validated environment, `npm audit` gate |
 
 ---
 
@@ -155,10 +258,20 @@ deployment with no path back.
 
 ---
 
-## GitHub Actions (optional)
+## Point it at your own repository
 
-Without this configured, the Pipelines view says so plainly. It never shows
-placeholder pipelines.
+Out of the box `GITHUB_MONITORED_REPO` names this project's own repository,
+which is the honest default: the Pipelines page shows the CI runs that built the
+thing you are looking at. **Change it in a fork** — otherwise it mirrors somebody
+else's pipelines.
+
+```
+GITHUB_MONITORED_REPO=your-org/your-repo
+```
+
+That alone is not enough to read anything: GitHub's Actions API needs a
+credential even for a public repository's runs. Without one, the Pipelines view
+says it is not connected. It never shows placeholder pipelines.
 
 **1. Choose a credential.** Exactly one — configuring both is rejected at
 startup, since which one is talking to GitHub would otherwise depend on code
@@ -191,12 +304,9 @@ GITHUB_TOKEN=github_pat_...
 The full comparison is in
 [ARCHITECTURE.md](./ARCHITECTURE.md#9-cicd-mirroring-github-actions).
 
-**2. Name the repository to mirror.** It is connected and backfilled at startup,
-so the Pipelines page has real content on first boot:
-
-```
-GITHUB_MONITORED_REPO=your-org/your-repo
-```
+**2. Restart.** The repository named above is connected and backfilled at
+start-up, so the Pipelines page has real content on first boot rather than after
+the first poll.
 
 Further repositories can be connected at runtime, as an `ADMIN` user:
 
@@ -416,9 +526,17 @@ pulsara_host_sample_age_seconds{host="Arman"} 3.639
 pulsara_service_up{service="Pulsara API",state="ONLINE"} 1
 pulsara_service_uptime_ratio{service="Pulsara Web"} 0.10826
 pulsara_service_latency_seconds{service="Pulsara API",quantile="0.95"} 0.013
+pulsara_service_last_check_age_seconds{service="Pulsara API"} 4.701
+pulsara_service_probe_interval_seconds{service="Pulsara API"} 15
 pulsara_incidents_open{severity="CRITICAL",source="AUTOMATED"} 1
 pulsara_deployments{status="FAILED"} 1
 ```
+
+The last two are a pair, and they are the ones to alert on. If probing stalls,
+nothing else here goes red: uptime and latency keep reporting the last window
+they measured, and the alert engines stay quiet because an absent observation is
+not a failed one. Comparing the age against that service's own interval is what
+makes a stopped prober visible — see [RUNBOOK.md](./RUNBOOK.md#the-health-check-worker-has-stalled).
 
 Values are in base units — seconds, bytes, and ratios in 0..1 rather than
 percentages — and the standard `process_*` and `nodejs_*` families are exported
@@ -678,31 +796,38 @@ Every response uses the same envelope:
 
 ## Project status
 
-Implemented: configuration and secrets hygiene, PostgreSQL with versioned
-migrations, authentication with rotation and RBAC, the error contract,
-structured logging, health probes, graceful shutdown, real host telemetry
-collection with batched persistence, a Prometheus scrape endpoint, service
-probing with a hysteresis state machine, derived uptime and latency percentiles,
-retention, an authenticated realtime stream, alerting engines that open and
-resolve incidents from observed outages, host resource pressure and failing
-deliveries, a GitHub Actions integration with signed webhooks and reconciling
-backfill, a distributed probe queue and read cache on Redis, session revocation
-enforced on every request, a dependency audit gate, and a web client that reads
-all of it through a single API layer with no token in `localStorage` and no
-placeholder rows.
+Every screen is fed by something that measured. Concretely:
 
-Two paths are implemented but **have never been run against the live third
-party**: Google sign-in against a real Firebase project, and GitHub polling
-against a real repository token. Both are covered by tests that stub exactly one
-function each, so everything Pulsara itself does is exercised — but nobody has
-watched either work end to end, and this README is not going to claim otherwise.
+| Claim | How it is true |
+| :--- | :--- |
+| No fabricated data in any runtime path | No `Math.random()` and no static data array outside `prisma/seed.ts`; the only mentions left are comments recording what was removed |
+| Pipelines shows real workflow runs | Signed `workflow_run` / `workflow_job` webhooks, idempotent upserts on run and job id, reconciling poll, backfill at start-up |
+| Telemetry is the real host | `systeminformation` counters every two seconds, windowed means persisted, exposed on `/metrics` in Prometheus format |
+| Incidents come from real triggers | Host thresholds with hysteresis, probe failures, failing default-branch deliveries — plus manual creation, all with an audit trail |
+| Redis does real work | BullMQ probe queue makes the sweep singular across replicas; read-through cache on `/api/services` and `/api/deployments`, invalidated on write |
+| CI gates every pull request | Format, lint, `npm audit`, typecheck, unit and integration tests under coverage, browser suite, and a `docker build` of both images |
+| Coverage is enforced, not reported | Thresholds in `backend/vitest.config.ts` and `frontend/vite.config.ts` fail the build below the floor |
+| Releases use no static AWS keys | `deploy.yml` assumes an IAM role over GitHub OIDC; there is no `AWS_ACCESS_KEY_ID` in this repository |
+| The AWS account is code | `infra/` stands up VPC, ECS Fargate, ALB, RDS, ElastiCache, ECR, Secrets Manager and the OIDC roles |
 
-Container images, a working `docker compose` stack, GitHub Actions CI, an
-OIDC-authenticated release workflow and Terraform for the account it deploys to
-are in place — the last two written and validated but never run, for want of an
-AWS account.
-[ARCHITECTURE.md](./ARCHITECTURE.md) tracks the current state precisely,
-including what has not been verified.
+### What has not been verified
+
+Three things are implemented, reviewed and covered by tests, and **have never
+been run against the live third party**:
+
+- **Google sign-in** against a real Firebase project.
+- **GitHub polling** against a real repository credential. The webhook path has
+  been exercised with real signed deliveries; the polling path stubs GitHub's
+  HTTP client.
+- **The release workflow and the Terraform**, which need an AWS account this
+  repository does not have. The Terraform formats, initialises and validates
+  against the real AWS provider in CI — but `terraform validate` proves a
+  configuration is internally consistent, not that AWS will accept it.
+
+Each is covered by tests that stub exactly one function, so everything Pulsara
+itself does is exercised. Nobody has watched any of the three work end to end,
+and this README is not going to claim otherwise.
+[ARCHITECTURE.md](./ARCHITECTURE.md) §17 tracks the same list precisely.
 
 ---
 
