@@ -54,6 +54,28 @@ export default defineConfig({
        * a decision.
        */
       exclude: ['src/server.ts', 'src/types/**', 'src/**/*.routes.ts'],
+      reporter: ['text-summary', 'lcov'],
+
+      /**
+       * A floor, not a target.
+       *
+       * The numbers are set just under what the suite currently reaches, which
+       * makes this a ratchet: a change that removes coverage fails, and a change
+       * that adds it raises the bar for the next one. Set at an aspirational
+       * figure instead, the threshold fails on unrelated work until somebody
+       * lowers it, and lowering a threshold twice teaches everybody it means
+       * nothing.
+       *
+       * It is also worth saying what this number is not. Coverage says a line
+       * ran, not that anything checked what it did. The suite this guards asserts
+       * behaviour against a real database precisely because a percentage cannot.
+       */
+      thresholds: {
+        lines: 75,
+        statements: 75,
+        functions: 83,
+        branches: 79,
+      },
     },
   },
 });
