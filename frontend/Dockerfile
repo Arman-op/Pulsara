@@ -52,7 +52,7 @@ RUN npm run build
 # The unprivileged image runs as UID 101 and listens on 8080, which is what
 # makes "do not run as root" work without rewriting nginx's pid and temp paths
 # by hand.
-FROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime
+FROM nginxinc/nginx-unprivileged:1.31-alpine AS runtime
 
 COPY --chown=nginx:nginx nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build --chown=nginx:nginx /app/dist /usr/share/nginx/html
