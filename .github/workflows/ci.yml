@@ -241,7 +241,7 @@ jobs:
         # a read-only token, and attempting a login would fail the job for a
         # reason that has nothing to do with the change under review.
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
