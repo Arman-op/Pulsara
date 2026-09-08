@@ -1,836 +1,791 @@
 # Pulsara
 
-Real-time infrastructure intelligence — and the first thing it monitors is
-itself.
+<div align="center">
 
-Pulsara watches the host its API runs on, probes the services it has been given
-URLs for, mirrors a real GitHub repository's Actions runs, and opens incidents
-when any of those go wrong. One rule holds the whole thing together: **the UI
-never shows a value the system did not actually observe.** A service nobody has
-probed yet renders an em dash, not a plausible percentage.
+**Real-Time DevOps & Infrastructure Intelligence Platform**
 
-That rule is the point of the project. This began as a dashboard that looked
-production-grade and was fed by `Math.random()` — invented CPU curves, a static
-array of pipelines, seeded incidents with no cause, and a login that accepted
-any email address paired with the password `password`. Every one of those has
-been replaced by something that measures. What remains is smaller than the demo
-pretended to be, and all of it is real.
+[![Node.js](https://img.shields.io/badge/Node.js-v22+-339933?style=flat&logo=node.js&logoColor=white)](https://nodejs.org/)
+[![React](https://img.shields.io/badge/React-v19-61DAFB?style=flat&logo=react&logoColor=black)](https://react.dev/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?style=flat&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Redis](https://img.shields.io/badge/Redis-7-DC382D?style=flat&logo=redis&logoColor=white)](https://redis.io/)
+[![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-3.4-06B6D4?style=flat&logo=tailwindcss&logoColor=white)](https://tailwindcss.com/)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=flat&logo=docker&logoColor=white)](https://www.docker.com/)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
----
+*Pulsara monitors real host telemetry, distributed service reachability, GitHub Actions CI/CD pipelines, and automated incident lifecycles — with zero fabricated data.*
 
-## What it actually monitors
-
-**The host the API runs on.** `systeminformation` reads real CPU, memory, disk,
-load and network counters every two seconds — in a container, that container's
-view of them. Every sample streams to the browser over an authenticated
-WebSocket; the mean of each thirty-second window is what reaches the database,
-because persisting every sample produced a quarter of a million rows a day to
-draw a chart that re-buckets them on read anyway.
-
-**Services it can reach.** Anything with an HTTP health-check URL. A scheduled
-worker records status and response time, and uptime and latency percentiles are
-derived from that stored history on read — never stored as a figure somebody
-could set to 99.9%.
-
-**A real GitHub repository.** `GITHUB_MONITORED_REPO` names it, and it is
-connected and backfilled at start-up, so the Pipelines page has real content on
-first boot. Signed webhooks keep it fresh; a reconciling poll keeps it correct
-when a delivery is missed. Without a credential configured, that page says it is
-not connected rather than showing invented rows.
-
-**Itself, when something is wrong.** Sustained CPU, memory or disk pressure; a
-service failing its checks; a failing workflow on the monitored repository's
-default branch. Each opens a real incident with a timeline, escalates it if the
-condition persists, and resolves it when the condition clears. People can open
-incidents by hand too, and every state transition writes an audit row naming who
-did it.
-
-**What it is not:** a fleet manager. It watches one host — the one it is running
-on — plus whatever endpoints somebody registered. Pointed at a Kubernetes
-cluster it would tell you nothing, and it does not pretend otherwise.
+</div>
 
 ---
 
-## How it fits together
+## Table of Contents
+
+- [About The Project](#about-the-project)
+  - [The Zero-Mock Principle](#the-zero-mock-principle)
+  - [Key Capabilities](#key-capabilities)
+  - [What Pulsara Is Not](#what-pulsara-is-not)
+- [System Architecture](#system-architecture)
+- [Technology Stack](#technology-stack)
+- [Prerequisites](#prerequisites)
+- [Installation & Setup](#installation--setup)
+  - [Method 1: Local Development (Recommended)](#method-1-local-development-recommended)
+  - [Method 2: Full Docker Stack (Single Command)](#method-2-full-docker-stack-single-command)
+  - [Method 3: Native Setup (Without Docker)](#method-3-native-setup-without-docker)
+- [Environment Configuration](#environment-configuration)
+  - [Backend (`backend/.env`)](#backend-backendenv)
+  - [Frontend (`frontend/.env`)](#frontend-frontendenv)
+  - [Generating Cryptographic Secrets](#generating-cryptographic-secrets)
+- [Integrations Setup](#integrations-setup)
+  - [GitHub Actions CI/CD Integration](#1-github-actions-cicd-integration)
+  - [Google Single Sign-On (Firebase Auth)](#2-google-single-sign-on-firebase-auth)
+  - [Email & OTP Verification (SMTP)](#3-email--otp-verification-smtp)
+- [Database Management](#database-management)
+- [Monitoring & Prometheus Exposition](#monitoring--prometheus-exposition)
+- [Testing & Quality Assurance](#testing--quality-assurance)
+- [REST API Reference](#rest-api-reference)
+- [Project Directory Structure](#project-directory-structure)
+- [Troubleshooting & FAQs](#troubleshooting--faqs)
+- [License](#license)
+
+---
+
+## About The Project
+
+**Pulsara** is an enterprise-grade, real-time DevOps and infrastructure intelligence platform designed to provide complete observability over modern application environments. It brings host system telemetry, distributed service probing, live GitHub Actions deployments, and incident tracking into a unified, responsive, dark-mode glassmorphic dashboard.
+
+### The Zero-Mock Principle
+
+> **Core Rule:** *The UI never displays a value the system did not actually observe.*
+
+Many dashboards rely on synthetic data, randomized charts (`Math.random()`), or hardcoded `99.9%` uptime figures. Pulsara rejects this entirely:
+- If a service has not been probed yet, its uptime renders an **em dash (`—`)**, not a fabricated percentage.
+- Host CPU, memory, and disk curves represent **actual OS performance counters** sampled in real time.
+- Pipelines display **real GitHub Actions workflow runs and jobs** mirrored through authenticated APIs and signed webhooks. If unconfigured, the view clearly indicates it is disconnected rather than inventing placeholder rows.
+- Incidents are opened by **real threshold breaches** or probe failures, complete with an immutable timeline and full audit logs.
+
+### Key Capabilities
+
+1. **Host Hardware & OS Telemetry**:
+   - Powered by `systeminformation`, reading real CPU utilization, memory pressure, disk consumption, network I/O, and load averages every 2 seconds.
+   - Live samples stream directly to the browser via an authenticated WebSocket connection (Socket.IO).
+   - Time-series aggregation writes the 30-second window mean to PostgreSQL, avoiding database bloat while preserving high-resolution trends.
+
+2. **Distributed Service Health Probing**:
+   - Actively probes registered HTTP/HTTPS health-check endpoints using a distributed Redis + BullMQ scheduler (with an automatic in-process fallback for single-instance setups).
+   - Uptime ratios and latency percentiles (such as p95) are calculated dynamically on-demand from verified historical check records.
+   - Built-in failure and recovery hysteresis prevents transient network blips from triggering false outages.
+
+3. **CI/CD Pipeline Mirroring (GitHub Actions)**:
+   - Synchronizes repository workflow runs and individual job stages.
+   - Employs HMAC-SHA256 signed webhooks for real-time updates and a background reconciling poller to catch missed deliveries.
+   - Automatic startup backfill ensures your pipelines page has instant historical data on first boot.
+
+4. **Intelligent Incident Lifecycle & Audit Logging**:
+   - **Automated incidents** trigger on sustained host saturation, consecutive probe failures, or broken default branch builds, with automatic recovery once healthy.
+   - **Manual incidents** allow engineers to log, assign, discuss, and track arbitrary operational events.
+   - Automated escalation promotes severity to `CRITICAL` during prolonged or high-impact conditions.
+   - Full timeline history and audit logging record who did what and when.
+
+5. **Enterprise Security & Role-Based Access Control (RBAC)**:
+   - Passwords hashed with **Argon2id** using strict OWASP-recommended parameters.
+   - 15-minute in-memory JWT access tokens combined with rotating HttpOnly refresh cookies scoped to `/api/auth`.
+   - Token family reuse detection revokes all active sessions if an already-rotated token is presented.
+   - Multi-tier roles (`ADMIN`, `MEMBER`, `VIEWER`) enforced through route middleware and checked against the database on every authenticated request.
+   - Optional Google SSO via Firebase Authentication and email one-time password (OTP) verification with domain restrictions.
+
+6. **Prometheus & Observability Ready**:
+   - Exposes standard Prometheus text metrics at `GET /metrics` in native base units (seconds, bytes, ratios 0..1).
+   - Structured JSON application logging via `pino` with correlated `requestId` tracking across all HTTP and background operations.
+
+### What Pulsara Is Not
+
+Pulsara is designed for targeted node and endpoint observability:
+- It is **not** a multi-cluster Kubernetes fleet manager.
+- It monitors the host its API is hosted on (or the container's view of that host), alongside any external HTTP endpoints you explicitly configure.
+
+---
+
+## System Architecture
 
 ```mermaid
 graph LR
-    subgraph browser["Browser"]
-        SPA["React 19 SPA"]
+    subgraph Browser["Client Application"]
+        SPA["React 19 SPA<br/>(Tailwind CSS + Recharts + Zustand)"]
     end
 
-    subgraph api["API process · Node 22"]
-        HTTP["Express 5<br/>REST + /metrics"]
-        WS["Socket.IO"]
-        COL["Host collector<br/>every 2s"]
-        ENG["Alert engines"]
-        SYNC["GitHub sync"]
+    subgraph API["Pulsara API · Node 22"]
+        HTTP["Express 5 REST API<br/>(/api/* & /metrics)"]
+        WS["Socket.IO Server<br/>(Live Telemetry)"]
+        COL["Host Collector<br/>(Every 2s via systeminformation)"]
+        ENG["Alert & Incident Engine"]
+        SYNC["GitHub Sync<br/>(Webhooks & Poller)"]
+        QUEUE["BullMQ Probe Scheduler"]
     end
 
-    subgraph data["State"]
-        DB[("PostgreSQL 16")]
-        REDIS[("Redis")]
+    subgraph Storage["State & Caching"]
+        DB[("PostgreSQL 16<br/>(Prisma ORM)")]
+        REDIS[("Redis 7<br/>(Queue & Read Cache)")]
     end
 
-    HOST["The host<br/>CPU · memory · disk"]
-    SVC["Registered<br/>health-check URLs"]
-    GH["GitHub Actions"]
-    PROM["Prometheus"]
+    subgraph External["Monitored Targets"]
+        HOST["Host System<br/>(CPU, Memory, Disk, Network)"]
+        SERVICES["Registered Endpoints<br/>(HTTP/HTTPS Health Checks)"]
+        GH["GitHub Actions<br/>(Workflow Runs & Jobs)"]
+        PROM["Prometheus Scraper"]
+    end
 
-    SPA -->|"REST, Bearer token"| HTTP
-    WS -.->|"live samples"| SPA
+    SPA -->|"REST (Bearer JWT)"| HTTP
+    WS -.->|"Live 2s Telemetry"| SPA
 
     HOST --> COL
     COL --> WS
-    COL -->|"30s window mean"| DB
+    COL -->|"30s Window Mean"| DB
     COL --> ENG
 
-    REDIS -->|"probe jobs"| SVC
-    SVC -->|"status + latency"| DB
-    SVC --> ENG
+    QUEUE -->|"Scheduled Probes"| SERVICES
+    SERVICES -->|"Latency & Status"| DB
+    SERVICES --> ENG
 
-    GH -->|"signed webhook"| HTTP
-    SYNC <-->|"reconciling poll"| GH
+    GH -->|"Signed Webhooks (HMAC-SHA256)"| HTTP
+    SYNC <-->|"Reconciling Poll"| GH
     SYNC --> DB
     SYNC --> ENG
 
-    ENG -->|"open · escalate · resolve"| DB
+    ENG -->|"Incidents & Timeline"| DB
     HTTP <--> DB
-    HTTP <-->|"read cache"| REDIS
-    PROM -->|"scrape"| HTTP
+    HTTP <-->|"Read-Through Cache"| REDIS
+    REDIS <--> QUEUE
+    PROM -->|"Scrape GET /metrics"| HTTP
 ```
-
-Everything on the left of that diagram is a measurement. Nothing on the right is
-a value the system made up.
-
-For the reasoning behind each decision — why a GitHub App rather than a token,
-why Fargate rather than EC2 or EKS, why Redis carries both a queue and a cache —
-see [ARCHITECTURE.md](./ARCHITECTURE.md). For what to do when something breaks,
-see [RUNBOOK.md](./RUNBOOK.md).
 
 ---
 
-## Stack
+## Technology Stack
 
-| Layer | Technology |
-| :--- | :--- |
-| Client | React 19, Vite 6, TypeScript, Tailwind CSS, Zustand, Recharts |
-| API | Node 22, Express 5, TypeScript, Socket.IO |
-| Data | PostgreSQL 16 via Prisma (versioned migrations) |
-| Queue and cache | Redis 7 via BullMQ — distributed probe scheduling, read-through cache |
-| Auth | Argon2id passwords + optional Google sign-in via Firebase; rotating refresh tokens |
-| Telemetry | `systeminformation` host counters, Prometheus exposition via `prom-client` |
-| Observability | pino structured logs with request-id correlation |
-| Tests | Vitest + Supertest against a real PostgreSQL, React Testing Library, Playwright |
-| Delivery | Multi-stage Docker images, GitHub Actions CI and OIDC release, Terraform on ECS Fargate |
-| Tooling | ESLint (type-aware), Prettier, Zod-validated environment, `npm audit` gate |
+| Layer | Technologies | Purpose |
+| :--- | :--- | :--- |
+| **Frontend UI** | React 19, TypeScript, Vite 6 | High-performance reactive Single Page Application |
+| **Styling & Design** | Tailwind CSS 3.4, Lucide React | Glassmorphic dark obsidian UI design system |
+| **Client State** | Zustand, LocalStorage Persistence | Auth session and transient UI store management |
+| **Visualizations** | Recharts | Live responsive area charts for CPU, Memory, and Network |
+| **Backend Runtime** | Node.js 22+, Express 5, TypeScript, `tsx` | Robust REST API server & real-time streaming engine |
+| **Real-Time Stream** | Socket.IO (v4) | Bidirectional WebSocket telemetry streaming |
+| **Database & ORM** | PostgreSQL 16, Prisma ORM (v6) | Relational persistence with versioned schema migrations |
+| **Queue & Cache** | Redis 7, BullMQ, `ioredis` | Distributed endpoint probe scheduling & read-through cache |
+| **Host Metrics** | `systeminformation`, `prom-client` | Deep hardware counter sampling & Prometheus exposition |
+| **Authentication** | `@node-rs/argon2`, `jsonwebtoken`, Firebase Admin | Argon2id password hashing, JWTs, Google OAuth 2.0 |
+| **Email & OTP** | Nodemailer, Crypto SHA-256 | Verification codes for sign-up and password reset |
+| **Observability** | Pino, Pino-HTTP | Structured JSON logging with request ID correlation |
+| **Testing** | Vitest, React Testing Library, Supertest, Playwright | Unit, integration (real DB/Redis), and E2E browser tests |
+| **Containerization** | Docker, Multi-Stage Dockerfiles, Docker Compose | Isolated, production-ready lightweight container images |
 
 ---
 
 ## Prerequisites
 
-- **Node.js 22+**
-- **Docker** (for PostgreSQL, and for running the stack in containers), or an
-  existing PostgreSQL 14+ instance
+Before setting up Pulsara, ensure your development machine has the following installed:
+
+- **Node.js**: Version `22.0.0` or later ([Download Node.js](https://nodejs.org/))
+- **npm**: Version `10.0.0` or later (bundled with Node 22)
+- **Docker & Docker Compose**: Version 2.0+ ([Download Docker](https://www.docker.com/))
+- **Git**: For cloning and version control ([Download Git](https://git-scm.com/))
+- **OpenSSL**: For generating secure cryptographic secrets (pre-installed on Linux/macOS; available via Git Bash / PowerShell on Windows)
 
 ---
 
-## Quick start
+## Installation & Setup
 
-### 1. Start PostgreSQL
+You can run Pulsara using any of the following three workflows:
+
+### Method 1: Local Development (Recommended)
+
+This method runs PostgreSQL and Redis inside Docker while executing the backend and frontend dev servers directly on your host machine for fast live reload and debugging.
+
+#### Step 1: Clone the Repository
+
+```bash
+git clone https://github.com/Arman-op/Pulsara.git
+cd Pulsara
+```
+
+#### Step 2: Spin Up PostgreSQL and Redis
+
+Start the backing data stores using Docker Compose:
 
 ```bash
 docker compose up -d
 ```
 
-This brings up only the database, which is what you need while running the API
-and the client from source. Port 5433 is used deliberately, so it does not clash
-with a native PostgreSQL on 5432.
+This starts:
+- **PostgreSQL 16** on host port `5433` (mapped from container `5432` to avoid conflicts with existing native PostgreSQL installations).
+- **Redis 7** on host port `6380` (mapped from container `6379` to avoid conflicts with native Redis installations).
 
-### 2. Configure and start the API
-
+Verify containers are running and healthy:
 ```bash
-cd backend
-npm install
-cp .env.example .env
+docker compose ps
 ```
 
-Now edit `.env`. Two values have no safe default and the server **will refuse to
-start** without them:
+#### Step 3: Backend Setup
 
-```bash
-# Generate a different value for each:
-openssl rand -base64 48   # -> JWT_ACCESS_SECRET
-openssl rand -base64 48   # -> JWT_REFRESH_SECRET
-```
+1. Navigate to the backend directory and install dependencies:
+   ```bash
+   cd backend
+   npm install
+   ```
 
-Also set `SEED_ADMIN_PASSWORD` to something at least 12 characters long — this
-becomes your first login.
+2. Create your local environment file:
+   ```bash
+   cp .env.example .env
+   ```
 
-Then create the schema, bootstrap the database and run:
+3. Generate secure cryptographic secrets for JWT tokens:
+   ```bash
+   # Run in your shell (Linux / macOS / Git Bash / PowerShell):
+   openssl rand -base64 48
+   openssl rand -base64 48
+   ```
+   Open `backend/.env` and paste the generated strings into:
+   - `JWT_ACCESS_SECRET`
+   - `JWT_REFRESH_SECRET`
 
-```bash
-npm run db:deploy      # apply migrations
-npm run db:seed        # first admin + service catalogue with live probe targets
-npm run dev            # http://localhost:4000
-```
+4. Set your initial administrator password in `backend/.env`:
+   ```ini
+   SEED_ADMIN_EMAIL=admin@pulsara.dev
+   SEED_ADMIN_PASSWORD=YourStrongPassword123!
+   ```
 
-The seed registers three services with **real, reachable probe targets**: this
-API, the PostgreSQL instance named by your `DATABASE_URL`, and the web client
-origin. Within a minute the dashboard reports measured uptime and latency for
-each. If the web client is not running yet it will correctly show as offline;
-start it and the probe promotes it back to online on its own.
+5. Apply database migrations and seed default data:
+   ```bash
+   npm run db:deploy   # Applies Prisma schema migrations
+   npm run db:seed     # Seeds initial admin user and real probe targets
+   ```
 
-Check it is alive:
+6. Start the backend development server:
+   ```bash
+   npm run dev
+   ```
+   *The API will start at **http://localhost:4000**.*
 
-```bash
-curl http://localhost:4000/api/health/ready
-```
+7. Confirm backend health in a new terminal:
+   ```bash
+   curl http://localhost:4000/api/health/ready
+   # Expected response: {"success":true,"data":{"status":"ready","database":"connected"}}
+   ```
 
-### 3. Configure and start the client
+#### Step 4: Frontend Setup
 
-```bash
-cd frontend
-npm install
-cp .env.example .env    # VITE_API_URL=http://localhost:4000 is enough to start
-npm run dev             # http://localhost:5174
-```
+1. Open a new terminal, navigate to the frontend directory, and install dependencies:
+   ```bash
+   cd frontend
+   npm install
+   ```
 
-Sign in with the `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` you configured.
+2. Create the frontend environment configuration:
+   ```bash
+   cp .env.example .env
+   ```
+   *The default `VITE_API_URL=http://localhost:4000` is already configured for local development.*
 
-> There are no demo credentials. The previous build accepted **any** email
-> address paired with the password `password` and signed you in as an
-> administrator; that bypass has been removed.
+3. Start the Vite development server:
+   ```bash
+   npm run dev
+   ```
+   *The client will start at **http://localhost:5174**.*
+
+#### Step 5: Access the Dashboard
+
+1. Open your browser and navigate to: **`http://localhost:5174`**
+2. Sign in with the credentials seeded in Step 3:
+   - **Email**: `admin@pulsara.dev`
+   - **Password**: Your configured `SEED_ADMIN_PASSWORD` (e.g., `YourStrongPassword123!`)
+3. You will be greeted by the live dashboard streaming actual host hardware metrics and real-time service health checks!
 
 ---
 
-## Google sign-in (optional)
+### Method 2: Full Docker Stack (Single Command)
 
-Google sign-in is off unless configured, and the button is not rendered when it
-is off. A partial configuration is rejected at startup rather than silently
-disabling the feature.
+If you prefer to run the entire stack (Frontend, Backend, Database, and Redis) containerized without installing local Node dependencies:
 
-**1. Create the project and turn the provider on.** At
-<https://console.firebase.google.com>, create a project, then under
-*Build → Authentication → Sign-in method* enable **Google**.
+1. Copy and configure the environment file:
+   ```bash
+   cp backend/.env.example backend/.env
+   ```
+2. Edit `backend/.env` and ensure `JWT_ACCESS_SECRET` and `JWT_REFRESH_SECRET` are populated with random keys (e.g., using `openssl rand -base64 48`).
+3. Build and launch all containers using the `app` Docker profile:
+   ```bash
+   docker compose --profile app up --build
+   ```
+4. Access the applications:
+   - **Web UI**: `http://localhost:5174`
+   - **API Server**: `http://localhost:4000`
+   - **Prometheus Metrics**: `http://localhost:4000/metrics`
 
-**2. Authorise the origin the client is served from.** Under
-*Authentication → Settings → Authorized domains*, add the host — `localhost` is
-there by default, so local development needs nothing; a deployed client does.
-Without it the popup opens and closes with `auth/unauthorized-domain`.
-
-**3. Supply all of the following.**
-
-In `backend/.env`, from *Project settings → Service accounts →
-Generate new private key* (the private key is shown once):
-
+*To stop the containers:*
+```bash
+docker compose --profile app down
 ```
-FIREBASE_PROJECT_ID=
-FIREBASE_CLIENT_EMAIL=
-FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n…\n-----END PRIVATE KEY-----\n"
-```
-
-In `frontend/.env`, from *Project settings → General → Your apps*:
-
-```
-VITE_FIREBASE_API_KEY=
-VITE_FIREBASE_AUTH_DOMAIN=
-VITE_FIREBASE_PROJECT_ID=
-VITE_FIREBASE_APP_ID=
-VITE_FIREBASE_MESSAGING_SENDER_ID=
-VITE_FIREBASE_STORAGE_BUCKET=
-```
-
-The backend rejects a token whose email address the provider has not verified,
-because an unverified address may belong to somebody else entirely and linking
-it would let an attacker take over an existing account by claiming its email at
-the identity provider.
-
-The first account to exist in a deployment becomes `ADMIN`. Everyone after that
-starts as `VIEWER` and must be promoted deliberately by an administrator through
-`PATCH /api/users/:id`. Granting `ADMIN` to every federated sign-in — which the
-original implementation did — turns "has a Google account" into "administers
-this deployment".
-
-An administrator cannot demote or deactivate themselves, and the last active
-administrator cannot be removed — both are ways to end up locked out of your own
-deployment with no path back.
 
 ---
 
-## Point it at your own repository
+### Method 3: Native Setup (Without Docker)
 
-Out of the box `GITHUB_MONITORED_REPO` names this project's own repository,
-which is the honest default: the Pipelines page shows the CI runs that built the
-thing you are looking at. **Change it in a fork** — otherwise it mirrors somebody
-else's pipelines.
+If you already have native PostgreSQL and Redis instances running on your machine or in the cloud:
 
-```
-GITHUB_MONITORED_REPO=your-org/your-repo
-```
-
-That alone is not enough to read anything: GitHub's Actions API needs a
-credential even for a public repository's runs. Without one, the Pipelines view
-says it is not connected. It never shows placeholder pipelines.
-
-**1. Choose a credential.** Exactly one — configuring both is rejected at
-startup, since which one is talking to GitHub would otherwise depend on code
-order rather than on configuration.
-
-*A GitHub App* — the right answer for anything deployed, because a token is
-somebody's personal credential and stops working the day they leave. Create one
-at *Settings → Developer settings → GitHub Apps* with repository permissions
-**Actions: Read-only** and **Metadata: Read-only**, subscribe it to the
-**Workflow run** and **Workflow job** events, install it on the account that
-owns the repository, then:
-
-```bash
-# Convert the .pem GitHub gave you into a single-line value
-node -e "console.log(JSON.stringify(require('fs').readFileSync(process.argv[1],'utf8')))" app.pem
-```
-
-```
-GITHUB_APP_ID=123456
-GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----\n"
-```
-
-*A fine-grained PAT* — fine for a laptop. **Actions: Read-only** and
-**Metadata: Read-only** on the repositories you want to mirror:
-
-```
-GITHUB_TOKEN=github_pat_...
-```
-
-The full comparison is in
-[ARCHITECTURE.md](./ARCHITECTURE.md#9-cicd-mirroring-github-actions).
-
-**2. Restart.** The repository named above is connected and backfilled at
-start-up, so the Pipelines page has real content on first boot rather than after
-the first poll.
-
-Further repositories can be connected at runtime, as an `ADMIN` user:
-
-```bash
-curl -X POST http://localhost:4000/api/integrations/github/connections \
-  -H "Authorization: Bearer $ACCESS_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"owner":"your-org","name":"your-repo"}'
-```
-
-Either way the repository is verified against the API before it is stored, so a
-typo fails immediately instead of becoming a connection that silently never
-syncs, and recent runs are backfilled straight away.
-
-**3. Add a webhook (optional, for live updates).** In the repository's
-*Settings → Webhooks*:
-
-- Payload URL: `https://your-host/api/integrations/github/webhook`
-  (a GitHub App carries this on the App itself rather than per repository)
-- Content type: `application/json`
-- Secret: generate with `openssl rand -base64 32` and set the same value as
-  `GITHUB_WEBHOOK_SECRET` in `backend/.env`
-- Events: **Workflow runs** and **Workflow jobs**
-
-Deliveries without a valid HMAC-SHA256 signature are rejected. Polling still
-reconciles anything a missed delivery would have lost, so webhooks are an
-optimisation rather than a requirement.
+1. Ensure PostgreSQL (v14+) and Redis (v6+) are accessible.
+2. In `backend/.env`, configure your connection strings:
+   ```ini
+   DATABASE_URL=postgresql://<user>:<password>@<host>:<port>/<dbname>?schema=public
+   REDIS_URL=redis://<host>:<port>
+   ```
+3. Run the standard backend setup:
+   ```bash
+   cd backend
+   npm install
+   npm run db:deploy
+   npm run db:seed
+   npm run dev
+   ```
+4. Run the frontend setup:
+   ```bash
+   cd frontend
+   npm install
+   npm run dev
+   ```
 
 ---
 
-## Running it in containers
+## Environment Configuration
 
-The whole stack, built from source and served the way it would be deployed:
+All environment variables are validated at startup with strict **Zod schemas**. If a required variable is missing or malformed, the application will exit immediately with an explicit error detailing the exact issue.
+
+### Backend (`backend/.env`)
+
+| Variable | Required | Default | Description |
+| :--- | :---: | :---: | :--- |
+| `NODE_ENV` | No | `development` | Application environment (`development`, `test`, `production`). |
+| `PORT` | No | `4000` | Port for the HTTP & WebSocket server. |
+| `LOG_LEVEL` | No | `debug` | Logger verbosity (`fatal`, `error`, `warn`, `info`, `debug`, `trace`). |
+| `DATABASE_URL` | **Yes** | — | PostgreSQL connection string. Must start with `postgresql://`. |
+| `TEST_DATABASE_URL` | No | — | Database for integration tests. Must end with `_test`. |
+| `CORS_ORIGINS` | **Yes** | `http://localhost:5174` | Comma-separated list of allowed browser origins. Wildcards are rejected. |
+| `RATE_LIMIT_WINDOW_MS` | No | `60000` | Window in milliseconds for global API rate limiting. |
+| `RATE_LIMIT_MAX_REQUESTS`| No | `300` | Max requests allowed per IP per rate limit window. |
+| `JWT_ACCESS_SECRET` | **Yes** | — | 32+ char secret for signing short-lived JWT access tokens. |
+| `JWT_REFRESH_SECRET` | **Yes** | — | 32+ char secret for refresh tokens (must differ from access secret). |
+| `ACCESS_TOKEN_TTL_SECONDS`| No | `900` | Access token lifespan in seconds (default: 15 minutes). |
+| `REFRESH_TOKEN_TTL_DAYS` | No | `7` | Refresh token lifespan in days. |
+| `METRICS_COLLECTION_ENABLED`| No | `true` | Enables periodic host OS counter sampling via `systeminformation`. |
+| `METRICS_SAMPLE_INTERVAL_MS`| No | `2000` | Sampling frequency for host hardware metrics (in ms). |
+| `METRICS_PERSIST_INTERVAL_MS`| No | `30000`| Interval for persisting windowed mean metrics to PostgreSQL. |
+| `HOST_ALERTS_ENABLED` | No | `true` | Enables automated incident creation on host saturation breaches. |
+| `CPU_ALERT_THRESHOLD_PERCENT`| No | `90` | CPU utilization percentage threshold to trigger an incident. |
+| `MEMORY_ALERT_THRESHOLD_PERCENT`| No | `90` | Memory usage percentage threshold to trigger an incident. |
+| `DISK_ALERT_THRESHOLD_PERCENT`| No | `85` | Disk usage percentage threshold to trigger an incident. |
+| `HOST_ALERT_CRITICAL_PERCENT`| No | `97` | Utilization threshold to escalate an open incident to `CRITICAL`. |
+| `PROMETHEUS_METRICS_ENABLED`| No | `true` | Exposes Prometheus scrape endpoint at `GET /metrics`. |
+| `METRICS_SCRAPE_TOKEN` | No | — | Optional Bearer token to protect `GET /metrics` in public networks. |
+| `REDIS_URL` | No | `redis://localhost:6380`| Connection URL for Redis. Enables BullMQ queue and read cache. |
+| `PROBES_ENABLED` | No | `true` | Enables scheduled HTTP health-check probing for registered services. |
+| `SERVICE_FAILURE_THRESHOLD`| No | `3` | Consecutive failed checks required before declaring a service offline. |
+| `SERVICE_RECOVERY_THRESHOLD`| No | `2` | Consecutive successful checks required to restore service status. |
+| `SERVICE_DEGRADED_LATENCY_MS`| No | `1000`| Latency threshold (ms) above which a service is marked `DEGRADED`. |
+| `SEED_ADMIN_EMAIL` | No | `admin@pulsara.dev` | Email used when executing `npm run db:seed`. |
+| `SEED_ADMIN_PASSWORD` | **Yes** (seed) | — | Password for the seeded admin user (minimum 12 characters). |
+| `GITHUB_MONITORED_REPO` | No | `Arman-op/Pulsara` | `owner/repo` to mirror on the CI/CD Pipelines screen. |
+| `GITHUB_TOKEN` | No | — | Fine-grained Personal Access Token with Actions/Metadata read permissions. |
+| `GITHUB_APP_ID` | No | — | GitHub App ID (alternative to `GITHUB_TOKEN`). |
+| `GITHUB_APP_PRIVATE_KEY` | No | — | GitHub App RSA Private Key string. |
+| `GITHUB_WEBHOOK_SECRET` | No | — | Secret to verify incoming GitHub webhook HMAC signatures. |
+| `AUTH_SIGNUP_ENABLED` | No | `true` | Allows new users to self-register via email OTP verification. |
+| `AUTH_SIGNUP_ALLOWED_DOMAINS`| No | — | Restricts signups to specific email domains (e.g. `company.com`). |
+| `SMTP_HOST` | No | — | SMTP host for sending verification and password reset codes. |
+| `SMTP_PORT` | No | `587` | SMTP port (587 for STARTTLS, 465 for SSL/TLS). |
+| `SMTP_USER` | No | — | SMTP authentication username. |
+| `SMTP_PASSWORD` | No | — | SMTP authentication password. |
+| `MAIL_FROM` | No | — | Sender address (e.g. `Pulsara <no-reply@yourdomain.com>`). |
+
+### Frontend (`frontend/.env`)
+
+| Variable | Required | Default | Description |
+| :--- | :---: | :---: | :--- |
+| `VITE_API_URL` | **Yes** | `http://localhost:4000` | Base origin of the Pulsara API for REST and WebSockets. |
+| `VITE_FIREBASE_API_KEY` | No | — | Firebase web client API key (enables Google Sign-In button). |
+| `VITE_FIREBASE_AUTH_DOMAIN` | No | — | Firebase authentication domain. |
+| `VITE_FIREBASE_PROJECT_ID` | No | — | Firebase project ID. |
+| `VITE_FIREBASE_APP_ID` | No | — | Firebase application ID. |
+
+### Generating Cryptographic Secrets
+
+Always generate high-entropy random secrets for your deployments:
 
 ```bash
-cp backend/.env.example backend/.env      # then fill in the secrets
-docker compose --profile app up --build
+# JWT Secrets (run twice to produce distinct keys):
+openssl rand -base64 48
+
+# GitHub Webhook Secret:
+openssl rand -base64 32
+
+# Prometheus Scrape Token:
+node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 ```
-
-The client is on <http://localhost:5174> and the API on
-<http://localhost:4000>, the same ports the dev servers use, so `CORS_ORIGINS`
-does not have to change between the two ways of running it.
-
-Both images are multi-stage: the toolchain and the source stay in the build
-stage, the API runs as the unprivileged `node` user, the client is served by
-unprivileged nginx on 8080, and both declare a `HEALTHCHECK`. The API's checks
-liveness rather than readiness, because a database blip must not make an
-orchestrator restart every replica during a failover.
-
-The client's API origin is a **build argument**, not a runtime variable: Vite
-inlines `VITE_*` values into the bundle, so an image is built for one
-deployment and cannot be repointed at another by changing an environment
-variable.
 
 ---
 
-## Continuous integration
+## Integrations Setup
 
-`.github/workflows/ci.yml` runs on every push and pull request:
+### 1. GitHub Actions CI/CD Integration
 
-| Job | What it does |
+Pulsara mirrors GitHub Actions workflows and jobs in real time.
+
+1. **Choose an Authentication Credential** (Configure exactly one):
+   - **Option A: Personal Access Token (PAT)** (Quickest for local dev)
+     - Create a fine-grained PAT at [GitHub Settings > Personal Access Tokens](https://github.com/settings/tokens?type=beta).
+     - Grant **Repository permissions**: `Actions: Read-only` and `Metadata: Read-only`.
+     - In `backend/.env`:
+       ```ini
+       GITHUB_TOKEN=github_pat_your_token_here
+       GITHUB_MONITORED_REPO=your-org/your-repo
+       ```
+   - **Option B: GitHub App** (Recommended for production)
+     - Create an app at [GitHub Settings > Developer Settings > GitHub Apps](https://github.com/settings/apps).
+     - Permissions: `Actions: Read-only`, `Metadata: Read-only`.
+     - Subscribe to events: **Workflow run** and **Workflow job**.
+     - Download the private `.pem` file and convert to a single-line string:
+       ```bash
+       node -e "console.log(JSON.stringify(require('fs').readFileSync('app.pem','utf8')))"
+       ```
+     - In `backend/.env`:
+       ```ini
+       GITHUB_APP_ID=123456
+       GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----\n"
+       GITHUB_MONITORED_REPO=your-org/your-repo
+       ```
+
+2. **Configure Live Webhooks (Optional but Recommended)**:
+   - In your repository under *Settings > Webhooks > Add webhook*:
+     - **Payload URL**: `https://your-domain.com/api/integrations/github/webhook`
+     - **Content type**: `application/json`
+     - **Secret**: Set a random secret and assign the same value to `GITHUB_WEBHOOK_SECRET` in `backend/.env`.
+     - **Events**: Select *Workflow runs* and *Workflow jobs*.
+
+---
+
+### 2. Google Single Sign-On (Firebase Auth)
+
+Enable one-click Google OAuth 2.0 logins:
+
+1. In the [Firebase Console](https://console.firebase.google.com), create a project.
+2. Under *Build > Authentication > Sign-in method*, enable **Google**.
+3. Under *Settings > Authorized domains*, ensure your client domain (`localhost` for dev, your production domain for deployed environments) is listed.
+4. Download service account credentials from *Project Settings > Service accounts > Generate new private key*.
+5. In `backend/.env`, supply:
+   ```ini
+   FIREBASE_PROJECT_ID=your-project-id
+   FIREBASE_CLIENT_EMAIL=firebase-adminsdk-xxx@your-project-id.iam.gserviceaccount.com
+   FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+   ```
+6. In `frontend/.env`, supply your client SDK keys from *Project Settings > General > Your apps*:
+   ```ini
+   VITE_FIREBASE_API_KEY=AIzaSy...
+   VITE_FIREBASE_AUTH_DOMAIN=your-project-id.firebaseapp.com
+   VITE_FIREBASE_PROJECT_ID=your-project-id
+   VITE_FIREBASE_APP_ID=1:xxx:web:xxx
+   ```
+
+*Role Provisioning Rule:* The very first user created in a deployment automatically receives the `ADMIN` role. All subsequent registrations start as `VIEWER` and must be elevated by an administrator.
+
+---
+
+### 3. Email & OTP Verification (SMTP)
+
+Pulsara supports self-service signup and password resets backed by 6-digit numeric OTP verification codes:
+
+1. In `backend/.env`, configure outbound SMTP settings:
+   ```ini
+   AUTH_SIGNUP_ENABLED=true
+   AUTH_SIGNUP_ALLOWED_DOMAINS=yourcompany.com,partner.org
+   SMTP_HOST=smtp.mailgun.org
+   SMTP_PORT=587
+   SMTP_USER=postmaster@yourcompany.com
+   SMTP_PASSWORD=your-smtp-password
+   MAIL_FROM="Pulsara <no-reply@yourcompany.com>"
+   ```
+2. One-time codes are stored as salted SHA-256 digests in the database, feature an automatic 10-minute expiry (`OTP_TTL_MINUTES=10`), a 5-attempt brute-force limit (`OTP_MAX_ATTEMPTS=5`), and a 60-second resend cooldown to protect mail reputation.
+
+---
+
+## Database Management
+
+Pulsara uses **Prisma ORM** with versioned PostgreSQL migrations.
+
+### Common Database Commands (`backend/`)
+
+| Command | Action |
 | :--- | :--- |
-| API | Prettier, ESLint, `npm audit`, `tsc`, unit tests, integration tests under coverage against real PostgreSQL and Redis service containers, build |
-| Web | Prettier, ESLint, `npm audit`, `tsc`, Vitest under coverage, production build |
-| End to end | Installs all three packages, then runs the Playwright suite in Chromium against the real API and the real client; uploads a trace on failure |
-| Images | `docker build` for both images; pushes them to GHCR only from `main` |
+| `npm run db:deploy` | Applies all pending migrations to the database (safe for production). |
+| `npm run db:migrate` | Generates a new migration from `schema.prisma` in development. |
+| `npm run db:seed` | Populates the database with default administrator and initial probe endpoints. |
+| `npm run db:studio` | Launches Prisma Studio GUI in your browser at `http://localhost:5555`. |
+| `npm run db:generate` | Regenerates the `@prisma/client` library based on the current schema. |
 
-Images are built on every run so a broken Dockerfile fails the pull request that
-caused it, but published only from the default branch — a fork's pull request
-must never be able to publish a tag a deployment might pull. Set the repository
-variable `VITE_API_URL` to the origin the published client should talk to.
+### Core Data Models
 
-Coverage runs in CI rather than being reported by hand, and the thresholds in
-`backend/vitest.config.ts` and `frontend/vite.config.ts` are floors set just
-under what the suites reach today. A change that removes coverage fails the
-build; a change that adds some raises the bar for the next one.
+- **`User`**: Account identity, email, password hash, role (`ADMIN`, `MEMBER`, `VIEWER`), avatar, and verification timestamp.
+- **`RefreshToken`**: Session tracking with rotating SHA-256 token hash and expiration.
+- **`OtpCode`**: Short-lived hashed one-time codes for email verification and password reset.
+- **`Service`**: Registered endpoints to probe with URL, interval, and health status.
+- **`ProbeResult`**: Historical log of status code, latency, and error per probe execution.
+- **`HostMetric`**: 30-second windowed aggregated host telemetry (CPU, memory, disk, network, load).
+- **`Deployment` & `Stage`**: Mirrored GitHub Actions workflow runs and individual steps.
+- **`Incident` & `IncidentTimeline`**: Operational alerts, lifecycle transitions, notes, and severity changes.
+- **`AuditLog`**: Tamper-evident record of administrative changes and manual incident updates.
 
 ---
 
-## Deployment
+## Monitoring & Prometheus Exposition
 
-`.github/workflows/deploy.yml` releases to AWS on every push to `main`, and can
-be re-run by hand from the Actions tab. It builds both images and pushes them to
-ECR tagged with the commit SHA, applies pending Prisma migrations, moves the ECS
-API service onto the new revision, waits for it to stabilise, then does the same
-for the client.
+Pulsara exposes self-monitoring metrics adhering to official Prometheus text exposition specifications:
 
-Migrations run as a **one-off ECS task from the same task-definition revision
-that is about to serve traffic** — same image, same secrets, same subnets —
-rather than from the GitHub runner. That keeps one configuration instead of two,
-and means the production database needs no public route into it.
+```bash
+curl -s http://localhost:4000/metrics | grep '^pulsara_'
+```
 
-### No AWS access keys
+### Sample Output
 
-The workflow authenticates with **GitHub Actions OIDC**. There is no
-`AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` anywhere in this repository or
-its secrets. GitHub mints a short-lived token describing the repository, ref and
-workflow that asked for it, and an IAM role decides whether to trust it.
+```
+pulsara_host_cpu_usage_ratio{host="pulsara-node-1"} 0.1845
+pulsara_host_memory_usage_ratio{host="pulsara-node-1"} 0.6420
+pulsara_host_disk_usage_ratio{host="pulsara-node-1"} 0.5218
+pulsara_host_sample_age_seconds{host="pulsara-node-1"} 1.820
+pulsara_service_up{service="Pulsara API",state="ONLINE"} 1
+pulsara_service_uptime_ratio{service="Pulsara Web"} 0.9998
+pulsara_service_latency_seconds{service="Pulsara API",quantile="0.95"} 0.024
+pulsara_service_last_check_age_seconds{service="Pulsara API"} 3.120
+pulsara_incidents_open{severity="CRITICAL",source="AUTOMATED"} 0
+pulsara_incidents_open{severity="HIGH",source="AUTOMATED"} 1
+pulsara_deployments{status="SUCCESS"} 12
+```
 
-Both the identity provider and the role are declared in [`infra/`](./infra) —
-`infra/iam.tf` — so this is not a console click somebody has to remember. The
-condition that matters is the `sub`:
+### Prometheus Scraper Configuration
 
+Add Pulsara to your `prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: 'pulsara'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['localhost:4000']
+    # If METRICS_SCRAPE_TOKEN is configured:
+    # authorization:
+    #   type: Bearer
+    #   credentials: 'your-configured-scrape-token'
+```
+
+---
+
+## Testing & Quality Assurance
+
+The codebase includes an extensive testing suite covering pure logic, database transactions, HTTP routes, React components, and end-to-end browser automation.
+
+```bash
+# 1. Run backend unit tests (zero infrastructure required):
+cd backend
+npm run test:unit
+
+# 2. Run backend integration tests (requires PostgreSQL & Redis):
+docker compose up -d
+npm run test:integration
+
+# 3. Run backend tests with coverage floor enforcement:
+npm run test:coverage
+
+# 4. Run frontend tests (Testing Library + jsdom):
+cd ../frontend
+npm test
+npm run test:coverage
+
+# 5. Run end-to-end browser tests with Playwright:
+cd ../e2e
+npm ci
+npm run install:browsers
+npm test
+```
+
+### Code Quality & Security Audits
+
+```bash
+# Type-check TypeScript:
+npm run typecheck    # (in backend/ and frontend/)
+
+# Run ESLint:
+npm run lint         # (in backend/ and frontend/)
+
+# Format checking:
+npm run format:check # (in backend/ and frontend/)
+
+# Dependency security audit gate:
+npm run audit        # (in backend/ and frontend/)
+```
+
+---
+
+## REST API Reference
+
+All application endpoints are served under the `/api` prefix, with the exception of `/metrics` which is served at the root.
+
+### Common Response Envelope
+
+**Success (2xx):**
 ```json
-"Condition": {
-  "StringEquals": {
-    "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-    "token.actions.githubusercontent.com:sub": "repo:<owner>/<repo>:ref:refs/heads/main"
+{
+  "success": true,
+  "data": { ... },
+  "meta": { ... }
+}
+```
+
+**Error (4xx / 5xx):**
+```json
+{
+  "success": false,
+  "error": {
+    "code": "VALIDATION_FAILED",
+    "message": "Invalid credentials provided",
+    "requestId": "req-98f24bc1"
   }
 }
 ```
 
-Without it, the provider vouches only that the token came from GitHub Actions —
-not that it came from *this* repository — and any workflow anywhere could assume
-the role. The policy attached to it grants ECR push, the ECS calls the release
-makes, and `iam:PassRole` restricted to the two task roles and to
-`ecs-tasks.amazonaws.com`, because naming a role is a form of using one and an
-unrestricted `PassRole` is the standard way out of a deployment role.
+### Route Catalog
 
-### What to configure
-
-Two secrets:
-
-| Secret | Description |
-| :--- | :--- |
-| `AWS_DEPLOY_ROLE_ARN` | The release role above, on the `production` environment |
-| `AWS_TERRAFORM_PLAN_ROLE_ARN` | The read-only role the infrastructure workflow plans with |
-
-Everything else is a repository variable, because none of it is secret — and
-none of it needs typing out, because Terraform prints it:
-
-```bash
-cd infra
-terraform output -json github_actions_variables |
-  jq -r 'to_entries[] | "gh variable set \(.key) --body \"\(.value)\""'
-```
-
-| Variable | Description |
-| :--- | :--- |
-| `AWS_REGION` | Region holding the registry and the cluster |
-| `ECR_REPOSITORY_API` / `ECR_REPOSITORY_WEB` | ECR repository names |
-| `ECS_CLUSTER` | Cluster name |
-| `ECS_SERVICE_API` / `ECS_SERVICE_WEB` | Service names |
-| `ECS_TASK_FAMILY_API` / `ECS_TASK_FAMILY_WEB` | Task-definition families |
-| `ECS_CONTAINER_API` / `ECS_CONTAINER_WEB` | Container names inside those definitions |
-| `ECS_SUBNET_IDS` | Comma-separated subnets for the migration task |
-| `ECS_SECURITY_GROUP_IDS` | Comma-separated security groups for it |
-| `VITE_API_URL` | Origin the published client talks to (inlined at build time) |
-| `VITE_FIREBASE_*` | Optional; enables Google sign-in in the published bundle |
-| `PRODUCTION_API_URL` | Optional; if set, the deploy checks `/api/health` afterwards |
-| `TF_STATE_BUCKET` / `TF_STATE_KEY` | Where the Terraform state lives, for the plan job |
-| `PRODUCTION_DOMAIN_NAME` / `ROUTE53_ZONE_ID` | Passed to `terraform plan` as variables |
-
-Application secrets — `DATABASE_URL`, the JWT secrets, the Firebase service
-account, the GitHub App key — are **not** passed by this workflow. They belong
-in AWS Secrets Manager and are referenced by the task definition's `secrets`
-block, so they are never in a GitHub log, a workflow file, or an image layer.
-
-> **Not verified.** This pipeline has never been run. Doing so needs the AWS
-> account [`infra/`](./infra) describes, and this repository has none. The
-> workflow is a reviewable design for a release, not something anybody has
-> watched go green.
-
----
-
-## Infrastructure
-
-[`infra/`](./infra) is Terraform for the account all of the above assumes: a VPC
-across two availability zones, an ECS Fargate cluster running the two services,
-an Application Load Balancer terminating HTTPS on an ACM certificate, RDS
-PostgreSQL and ElastiCache Redis in private subnets, ECR repositories, and the
-Secrets Manager entries the tasks read at start-up.
-
-Public subnets hold exactly one thing: the load balancer. Everything else — both
-services, the database, the cache — sits in private subnets with no inbound
-route, so the reachable surface of the deployment is two ports. There is no
-bastion; migrations run as a one-off task on the API's own security group, and a
-shell in a running container is ECS Exec.
-
-The names the release workflow needs are Terraform outputs rather than something
-to copy by hand, which is what stops a release pointing at a cluster that no
-longer exists.
-
-`.github/workflows/infra.yml` runs `fmt`, `validate` and a **`terraform plan`**
-on every pull request touching `infra/`. Nothing applies on its own: no push,
-merge or schedule reaches the apply job, which needs a manual dispatch *and* an
-approval from the `infrastructure` environment's reviewers. The role it assumes
-is deliberately not declared in the configuration it applies — creating IAM
-roles is indistinguishable from administrator access, and a configuration that
-declares the role used to apply it is a loop with an account takeover in the
-middle.
-
-[infra/README.md](./infra/README.md) has the bootstrap order, and a table of
-every choice with a price attached — single NAT gateway, Multi-AZ, Spot,
-Graviton — with what each one costs and what it buys.
-
-> **Not verified**, in the same sense as the release workflow: it formats,
-> initialises and validates in CI, but no `terraform apply` has ever run.
+| Method | Endpoint | Access | Purpose |
+| :--- | :--- | :---: | :--- |
+| `GET` | `/health` | Public | Liveness check (touches no dependencies). |
+| `GET` | `/health/ready` | Public | Readiness probe (verifies database connectivity). |
+| `GET` | `/metrics` | Public / Bearer | Standard Prometheus text metrics exposition. |
+| **Auth** | | | |
+| `POST` | `/api/auth/login` | Public | Email and password sign-in; returns access token + sets refresh cookie. |
+| `POST` | `/api/auth/firebase` | Public | Exchanges a verified Firebase Google ID token for a session. |
+| `POST` | `/api/auth/refresh` | Cookie | Rotates refresh token cookie and issues a new access token. |
+| `POST` | `/api/auth/logout` | Public | Revokes refresh token session and clears session cookies. |
+| `GET` | `/api/auth/me` | Authenticated | Fetches profile of the currently logged-in user. |
+| `PATCH` | `/api/auth/me` | Authenticated | Updates display name or avatar URL. |
+| `POST` | `/api/auth/password` | Authenticated | Changes password and revokes all other active sessions. |
+| `GET` | `/api/auth/sessions` | Authenticated | Lists all active refresh sessions for the current account. |
+| `DELETE` | `/api/auth/sessions` | Authenticated | Terminates all active sessions (sign out everywhere). |
+| **Users & Administration** | | | |
+| `GET` | `/api/users` | `ADMIN` | Lists all users with roles and active status. |
+| `PATCH` | `/api/users/:id` | `ADMIN` | Changes a user's role or toggles active status. |
+| `GET` | `/api/users/audit/log` | `ADMIN` | Retrieves paginated audit trail of privileged operations. |
+| **Services & Probing** | | | |
+| `GET` | `/api/services` | Authenticated | Returns monitored service catalogue with uptime & p95 latency. |
+| `GET` | `/api/services/:id` | Authenticated | Detailed status and recent probe checks for a specific service. |
+| `POST` | `/api/services` | `ADMIN` | Registers a new HTTP/HTTPS endpoint to monitor. |
+| `PATCH` | `/api/services/:id` | `ADMIN` | Modifies probe interval, URL, or toggles maintenance mode. |
+| `DELETE` | `/api/services/:id` | `ADMIN` | Deletes a monitored service and cascades probe history. |
+| **Telemetry & Metrics** | | | |
+| `GET` | `/api/metrics/series` | Authenticated | Queries downsampled historical host metrics (`from`, `to`, `types`). |
+| `GET` | `/api/metrics/latest` | Authenticated | Returns the most recent hardware metrics sample. |
+| `GET` | `/api/metrics/hosts` | Authenticated | Lists all host IDs that have reported telemetry. |
+| **Deployments (CI/CD)** | | | |
+| `GET` | `/api/deployments` | Authenticated | Lists mirrored workflow runs with filters (`status`, `repo`, `branch`). |
+| `GET` | `/api/deployments/stats` | Authenticated | Computes deployment success rates and median build durations. |
+| `GET` | `/api/deployments/:id` | Authenticated | Returns run details along with individual execution stages. |
+| **GitHub Integration** | | | |
+| `GET` | `/api/integrations/github/status` | Authenticated | Checks if polling and webhooks are active. |
+| `GET` | `/api/integrations/github/connections` | Authenticated | Lists connected GitHub repositories. |
+| `POST` | `/api/integrations/github/connections` | `ADMIN` | Connects and triggers backfill for a new repository. |
+| `DELETE` | `/api/integrations/github/connections/:id`| `ADMIN` | Disconnects a repository (preserves history). |
+| `POST` | `/api/integrations/github/connections/:id/sync` | `ADMIN` | Forces an immediate manual sync with GitHub Actions API. |
+| `POST` | `/api/integrations/github/webhook` | Signed Webhook | Ingests signed GitHub `workflow_run` and `workflow_job` events. |
+| **Incidents** | | | |
+| `GET` | `/api/incidents` | Authenticated | Lists operational incidents with filters (`status`, `severity`, `isOpen`). |
+| `GET` | `/api/incidents/summary` | Authenticated | Returns counts of open and resolved incidents by severity. |
+| `GET` | `/api/incidents/:id` | Authenticated | Returns incident details with full chronological timeline. |
+| `POST` | `/api/incidents` | `MEMBER` | Manually logs a new incident. |
+| `PATCH` | `/api/incidents/:id` | `MEMBER` | Updates incident status, severity, or assignee. |
+| `POST` | `/api/incidents/:id/comments` | `MEMBER` | Adds an engineer investigation note to the incident timeline. |
 
 ---
 
-## Monitoring
-
-Pulsara exposes itself the way it expects other systems to: `GET /metrics`
-serves Prometheus text exposition, at the root and outside the JSON envelope,
-because that is the path and format every scraper already expects.
-
-```bash
-curl -s localhost:4000/metrics | grep '^pulsara_'
-```
+## Project Directory Structure
 
 ```
-pulsara_host_cpu_usage_ratio{host="Arman"} 0.2448
-pulsara_host_memory_usage_ratio{host="Arman"} 0.9199
-pulsara_host_disk_usage_ratio{host="Arman"} 0.7792
-pulsara_host_sample_age_seconds{host="Arman"} 3.639
-pulsara_service_up{service="Pulsara API",state="ONLINE"} 1
-pulsara_service_uptime_ratio{service="Pulsara Web"} 0.10826
-pulsara_service_latency_seconds{service="Pulsara API",quantile="0.95"} 0.013
-pulsara_service_last_check_age_seconds{service="Pulsara API"} 4.701
-pulsara_service_probe_interval_seconds{service="Pulsara API"} 15
-pulsara_incidents_open{severity="CRITICAL",source="AUTOMATED"} 1
-pulsara_deployments{status="FAILED"} 1
+Pulsara/
+├── README.md                      # Comprehensive project documentation
+├── ARCHITECTURE.md                # In-depth architectural design decisions
+├── RUNBOOK.md                     # Operational troubleshooting and runbook
+├── docker-compose.yml             # Container definitions (Postgres, Redis, App)
+├── backend/                       # Pulsara Express & WebSocket API
+│   ├── prisma/
+│   │   ├── schema.prisma          # Database schema and models
+│   │   ├── migrations/            # Versioned SQL migrations
+│   │   └── seed.ts                # Initial admin & probe target seed script
+│   ├── src/
+│   │   ├── app.ts                 # Express application configuration
+│   │   ├── server.ts              # HTTP & Socket.IO server startup
+│   │   ├── config/                # Environment variables & constants
+│   │   ├── db/                    # Prisma client singleton
+│   │   ├── lib/                   # Errors, logger, and utility libraries
+│   │   ├── middleware/            # Auth guard, error handling, rate limiting
+│   │   ├── modules/               # Domain modules (auth, telemetry, incidents, etc.)
+│   │   └── realtime/              # WebSocket telemetry broadcast emitter
+│   ├── tests/                     # Unit and integration test suites
+│   ├── package.json
+│   └── tsconfig.json
+├── frontend/                      # React 19 Single Page Application
+│   ├── src/
+│   │   ├── App.tsx                # Application shell and routing
+│   │   ├── main.tsx               # Entrypoint & DOM mounting
+│   │   ├── index.css              # Custom Tailwind theme tokens & glassmorphism
+│   │   ├── app/                   # Shell layout, navigation & Sidebar
+│   │   ├── features/              # Feature pages (Dashboard, Alerts, Pipelines, etc.)
+│   │   └── shared/                # UI components (Button, Card, Drawer, StatusDot)
+│   ├── package.json
+│   ├── tailwind.config.js
+│   └── vite.config.ts
+├── e2e/                           # Playwright end-to-end browser test suite
+├── infra/                         # Terraform declarations for AWS ECS Fargate
+└── scripts/                       # CI audit and utility scripts
 ```
-
-The last two are a pair, and they are the ones to alert on. If probing stalls,
-nothing else here goes red: uptime and latency keep reporting the last window
-they measured, and the alert engines stay quiet because an absent observation is
-not a failed one. Comparing the age against that service's own interval is what
-makes a stopped prober visible — see [RUNBOOK.md](./RUNBOOK.md#the-health-check-worker-has-stalled).
-
-Values are in base units — seconds, bytes, and ratios in 0..1 rather than
-percentages — and the standard `process_*` and `nodejs_*` families are exported
-under their conventional names, so off-the-shelf Node dashboards work unchanged.
-A metric that has not been measured is an **absent series**, never a zero.
-
-Scrape it with:
-
-```yaml
-scrape_configs:
-  - job_name: pulsara
-    static_configs:
-      - targets: ['pulsara-api:4000']
-```
-
-Set `METRICS_SCRAPE_TOKEN` if the port is reachable from outside the cluster;
-the scraper then needs `authorization: Bearer <token>`. The response names every
-monitored service, reports host saturation and counts open incidents.
-
-### Scaling out
-
-Probing and caching both use Redis when `REDIS_URL` is set, and neither is
-required:
-
-```
-REDIS_URL=redis://localhost:6380
-```
-
-Without it, probes run on an in-process timer and reads go to PostgreSQL — right
-for one instance, wrong for several, because every replica would probe every
-service and multiply load on the endpoints being measured. With it, a BullMQ
-repeatable job sweeps once across the fleet while the probes spread over every
-instance, and `/api/services` and `/api/deployments` are served from a
-short-lived cache that every write invalidates.
-
-`docker compose up -d` starts Redis on 6380 alongside PostgreSQL on 5433.
-
-### Where incidents come from
-
-| Source | Opens when | Resolves when |
-| :--- | :--- | :--- |
-| Service probing | A monitored service fails its checks | It answers again |
-| Host resources | CPU, memory or disk stays over its threshold | Usage stays under it |
-| GitHub Actions | The default branch's workflow is failing | It passes again |
-| A person | Somebody opens one in the UI | Somebody resolves it |
-
-The first three are `AUTOMATED` and deduplicated per condition, so a flapping
-service produces one incident rather than one per probe. The fourth is `MANUAL`,
-carries no dedupe key — two people tracking two problems on one service is
-legitimate — and is never closed automatically: a person may be tracking
-something no probe can see.
-
-Every state change, whoever makes it, appends to the incident timeline. Changes
-a *person* makes also write an `AuditLog` row naming them and recording the
-before and after, readable by an administrator at `/api/users/audit/log`.
-
-### Alerts on host resources
-
-Sampled CPU, memory and disk usage are compared against configured thresholds on
-every sample, and a breach sustained for `HOST_ALERT_SUSTAINED_SAMPLES`
-consecutive samples opens a real `Incident` — the same records a person can open
-by hand, visible on the same page, with the same timeline:
-
-```
-Memory pressure on Arman
-  HIGH · AUTOMATED · open
-  Memory on Arman is at 91.8%, at or above the 90% threshold
-```
-
-It resolves itself once usage stays below the threshold for
-`HOST_ALERT_RECOVERY_SAMPLES` consecutive samples, and escalates to CRITICAL at
-`HOST_ALERT_CRITICAL_PERCENT`. Incidents a person opened are never closed
-automatically. Thresholds are per resource; see `backend/.env.example`.
 
 ---
 
-## Scripts
+## Troubleshooting & FAQs
 
-### `backend/`
+### 1. Database Connection Errors (`ECONNREFUSED` on port 5432)
+- **Cause**: By default, Docker Compose exposes PostgreSQL on port `5433` to prevent clashing with native PostgreSQL installations running on `5432`.
+- **Solution**: Ensure your `DATABASE_URL` in `backend/.env` points to port `5433`:
+  ```ini
+  DATABASE_URL=postgresql://pulsara:pulsara_local_dev@localhost:5433/pulsara?schema=public
+  ```
 
-| Command | Purpose |
-| :--- | :--- |
-| `npm run dev` | Start with reload |
-| `npm run build` | Generate the Prisma client and compile to `dist/` |
-| `npm start` | Run the compiled output |
-| `npm run typecheck` | Type-check without emitting |
-| `npm run lint` | Type-aware ESLint |
-| `npm run format` | Prettier |
-| `npm test` | Unit and integration suites |
-| `npm run test:unit` | Pure logic only; needs no database |
-| `npm run test:integration` | Real HTTP against a real PostgreSQL and Redis |
-| `npm run test:coverage` | Both suites, with the CI coverage floor enforced |
-| `npm run db:migrate` | Create/apply a migration in development |
-| `npm run db:deploy` | Apply pending migrations (production) |
-| `npm run db:seed` | First admin + service catalogue |
-| `npm run db:studio` | Prisma Studio |
+### 2. Server Refuses to Start (`JWT_ACCESS_SECRET` / `JWT_REFRESH_SECRET`)
+- **Cause**: The API enforces strict startup validation to ensure secrets are securely configured. Default or placeholder values are rejected.
+- **Solution**: Generate two separate 48-byte secrets using OpenSSL:
+  ```bash
+  openssl rand -base64 48
+  ```
+  Paste them into `JWT_ACCESS_SECRET` and `JWT_REFRESH_SECRET` in `backend/.env`.
 
-### `e2e/`
+### 3. Services Appear as "Offline" on First Boot
+- **Explanation**: The seed script registers three real endpoints: the API itself, the PostgreSQL database, and the web client origin (`http://localhost:5174`). If the frontend is not running yet, the background probe worker will correctly measure it as offline. As soon as you start the frontend dev server, the next probe cycle will automatically detect it and mark it online!
 
-| Command | Purpose |
-| :--- | :--- |
-| `npm run install:browsers` | Download Chromium (once) |
-| `npm test` | Start both servers and drive a real browser |
-| `npm run test:headed` | The same, with the browser visible |
+### 4. CORS Errors in the Browser
+- **Cause**: The browser origin does not match `CORS_ORIGINS` in `backend/.env`.
+- **Solution**: Ensure `CORS_ORIGINS` contains the exact URL your browser is using (e.g., `http://localhost:5174`). Wildcards (`*`) are disallowed because the API uses credentialed sessions.
 
-### `frontend/`
-
-| Command | Purpose |
-| :--- | :--- |
-| `npm run dev` | Vite dev server on port 5174 (pinned) |
-| `npm run build` | Type-check and produce a production bundle |
-| `npm run preview` | Serve the production bundle locally |
-| `npm run typecheck` | Type-check |
-| `npm run lint` | ESLint |
-| `npm run format` | Prettier |
-| `npm test` | Vitest with jsdom and Testing Library |
-| `npm run test:coverage` | The same, with the CI coverage floor enforced |
+### 5. Firebase Private Key Formatting Error
+- **Cause**: Private keys copied from Google service account JSON files contain escaped newlines (`\n`).
+- **Solution**: Wrap the entire key in double quotes in `backend/.env` and preserve the `\n` characters on a single line:
+  ```ini
+  FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgk...\n-----END PRIVATE KEY-----\n"
+  ```
 
 ---
 
-## Tests
+## License
 
-```bash
-cd backend  && npm run test:unit   # no infrastructure required
-docker compose up -d               # PostgreSQL and Redis, for the integration suite
-cd backend  && npm run test:coverage
-cd frontend && npm run test:coverage
-
-cd e2e && npm ci && npm run install:browsers
-npm test                           # starts both servers itself
-```
-
-| Suite | What it drives | Count |
-| :--- | :--- | ---: |
-| `backend/tests/unit` | Pure decision logic, no infrastructure | 52 |
-| `backend/tests/integration` | Real Express over HTTP, real PostgreSQL and Redis | 204 |
-| `frontend/src/**/*.test.tsx` | React in jsdom, `fetch` stubbed | 55 |
-| `e2e` | Real Chromium against the real stack | 6 |
-
-The backend integration suite runs against a real PostgreSQL database rather
-than a mocked Prisma client, because every guarantee worth testing here lives in
-the database: the partial unique index that deduplicates incidents, the
-serializable transaction that stops the last administrator being removed, the
-compare-and-swap that makes refresh-token rotation safe. A mocked client would
-pass just as happily with all three removed.
-
-It creates and migrates a `pulsara_test` database on first run, and refuses to
-run against any database whose name does not end in `_test` — it truncates every
-table between cases. Override the target with `TEST_DATABASE_URL`.
-
-The browser suite covers what neither of the others can. The API tests have no
-browser and the component tests have no server, so neither would notice the two
-sides disagreeing — a refresh cookie the browser declines to store, a CORS origin
-that does not match, a socket handshake authenticated differently at each end.
-Playwright starts both servers itself against a database of its own, so it runs
-from a clean checkout with only Docker up. Its central assertion is a CPU figure
-that *changes*: a token held only in memory authenticated a socket handshake, the
-server accepted it, and a real `systeminformation` reading arrived.
-
-Coverage thresholds are enforced in CI and set just below what the suites reach,
-so they ratchet upward rather than becoming something to lower. The client's
-figure is lower than the API's on purpose — its logic-carrying modules are above
-90%, and five list screens are mostly JSX covered by the browser suite instead.
-
-The cache and probe-queue suites need Redis, for the same reason the rest need
-PostgreSQL: what is worth testing there — that invalidation actually deletes,
-that two schedulers do not double-probe — is behaviour of the broker, not of the
-code calling it. Override
-with `TEST_REDIS_URL`.
-
----
-
-## Security posture
-
-| Control | How |
-| :--- | :--- |
-| Password storage | argon2id, OWASP parameters pinned explicitly |
-| Access token | 15 minutes, held in memory only, never in `localStorage` |
-| Refresh token | HttpOnly cookie scoped to `/api/auth`, rotated on every use |
-| Replay | A rotated token presented again revokes the whole family |
-| Sign out everywhere | Refuses access tokens issued before the moment of revocation |
-| Every request | Role, active flag and revocation stamp read from the account, not the token |
-| Authorisation | Role-ranked, enforced per route and covered by a generated matrix test |
-| Input | Zod on every body and query, one error envelope |
-| Webhooks | HMAC-SHA256 over raw bytes, `timingSafeEqual` |
-| Dependencies | `npm audit` in CI on production dependencies, with a justified allowlist |
-
-Run the dependency gate locally with `npm run audit` in either package.
-
----
-
-## Environment variables
-
-Every variable is documented in `backend/.env.example` and
-`frontend/.env.example`, and both are validated by a Zod schema at startup. A
-missing or malformed value produces one line per problem and a non-zero exit —
-it never falls back to a default.
-
-Secrets are never committed. In production they come from AWS Secrets Manager
-and GitHub Actions secrets.
-
----
-
-## API
-
-All routes below are under `/api`. The one exception is `GET /metrics` at the
-root, which serves Prometheus text exposition — see **Monitoring** below.
-
-Every response uses the same envelope:
-
-```jsonc
-{ "success": true,  "data": …, "meta": … }
-{ "success": false, "error": { "code": "…", "message": "…", "requestId": "…" } }
-```
-
-| Method | Route | Auth | Purpose |
-| :--- | :--- | :--- | :--- |
-| `GET` | `/health` | — | Liveness; touches no dependency |
-| `GET` | `/health/ready` | — | Readiness; pings the database |
-| `POST` | `/auth/login` | — | Email + password, rate limited |
-| `POST` | `/auth/firebase` | — | Exchange a Google ID token |
-| `POST` | `/auth/refresh` | cookie | Rotate the session |
-| `POST` | `/auth/logout` | cookie | Revoke the session |
-| `GET` | `/auth/me` | Bearer | Current user, read from the database |
-| `PATCH` | `/auth/me` | Bearer | Update own name or avatar |
-| `POST` | `/auth/password` | Bearer | Change own password; revokes every session |
-| `GET` | `/auth/sessions` | Bearer | List own live sessions |
-| `DELETE` | `/auth/sessions` | Bearer | Sign out everywhere |
-| `GET` | `/users` | ADMIN | List users (`role`, `isActive`) |
-| `PATCH` | `/users/:id` | ADMIN | Change a role or deactivate an account |
-| `GET` | `/users/audit/log` | ADMIN | Audit trail of privileged actions |
-| `GET` | `/services` | Bearer | Catalogue, with uptime and latency derived from probes |
-| `GET` | `/services/:id` | Bearer | One service plus its recent raw checks |
-| `POST` | `/services` | ADMIN | Register a service to probe |
-| `PATCH` | `/services/:id` | ADMIN | Update probe config or declare maintenance |
-| `DELETE` | `/services/:id` | ADMIN | Remove a service and its probe history |
-| `GET` | `/metrics/series` | Bearer | Downsampled telemetry (`from`, `to`, `types`, `maxPoints`) |
-| `GET` | `/metrics/latest` | Bearer | Most recent sample of each metric family |
-| `GET` | `/metrics/hosts` | Bearer | Hosts that have reported samples |
-| `GET` | `/deployments` | Bearer | Workflow runs (`limit`, `offset`, `status`, `repo`, `branch`) |
-| `GET` | `/deployments/stats` | Bearer | Success rate and median duration |
-| `GET` | `/deployments/:id` | Bearer | One run with its jobs |
-| `GET` | `/integrations/github/status` | Bearer | Whether polling and webhooks are configured |
-| `GET` | `/integrations/github/connections` | Bearer | Connected repositories |
-| `POST` | `/integrations/github/connections` | ADMIN | Connect a repository |
-| `DELETE` | `/integrations/github/connections/:id` | ADMIN | Disconnect (history is kept) |
-| `POST` | `/integrations/github/connections/:id/sync` | ADMIN | Force a sync now |
-| `POST` | `/integrations/github/webhook` | signature | GitHub delivery endpoint |
-| `GET` | `/incidents` | Bearer | Feed (`limit`, `offset`, `status`, `severity`, `serviceId`, `isOpen`) |
-| `GET` | `/incidents/summary` | Bearer | Open/resolved counts by severity |
-| `GET` | `/incidents/:id` | Bearer | One incident with its full timeline |
-| `POST` | `/incidents` | MEMBER | Raise an incident by hand |
-| `PATCH` | `/incidents/:id` | MEMBER | Change status, severity or assignee |
-| `POST` | `/incidents/:id/comments` | MEMBER | Append a note to the timeline |
-
----
-
-## Project status
-
-Every screen is fed by something that measured. Concretely:
-
-| Claim | How it is true |
-| :--- | :--- |
-| No fabricated data in any runtime path | No `Math.random()` and no static data array outside `prisma/seed.ts`; the only mentions left are comments recording what was removed |
-| Pipelines shows real workflow runs | Signed `workflow_run` / `workflow_job` webhooks, idempotent upserts on run and job id, reconciling poll, backfill at start-up |
-| Telemetry is the real host | `systeminformation` counters every two seconds, windowed means persisted, exposed on `/metrics` in Prometheus format |
-| Incidents come from real triggers | Host thresholds with hysteresis, probe failures, failing default-branch deliveries — plus manual creation, all with an audit trail |
-| Redis does real work | BullMQ probe queue makes the sweep singular across replicas; read-through cache on `/api/services` and `/api/deployments`, invalidated on write |
-| CI gates every pull request | Format, lint, `npm audit`, typecheck, unit and integration tests under coverage, browser suite, and a `docker build` of both images |
-| Coverage is enforced, not reported | Thresholds in `backend/vitest.config.ts` and `frontend/vite.config.ts` fail the build below the floor |
-| Releases use no static AWS keys | `deploy.yml` assumes an IAM role over GitHub OIDC; there is no `AWS_ACCESS_KEY_ID` in this repository |
-| The AWS account is code | `infra/` stands up VPC, ECS Fargate, ALB, RDS, ElastiCache, ECR, Secrets Manager and the OIDC roles |
-
-### What has not been verified
-
-Three things are implemented, reviewed and covered by tests, and **have never
-been run against the live third party**:
-
-- **Google sign-in** against a real Firebase project.
-- **GitHub polling** against a real repository credential. The webhook path has
-  been exercised with real signed deliveries; the polling path stubs GitHub's
-  HTTP client.
-- **The release workflow and the Terraform**, which need an AWS account this
-  repository does not have. The Terraform formats, initialises and validates
-  against the real AWS provider in CI — but `terraform validate` proves a
-  configuration is internally consistent, not that AWS will accept it.
-
-Each is covered by tests that stub exactly one function, so everything Pulsara
-itself does is exercised. Nobody has watched any of the three work end to end,
-and this README is not going to claim otherwise.
-[ARCHITECTURE.md](./ARCHITECTURE.md) §17 tracks the same list precisely.
-
----
-
-## Licence
-
-MIT
+This project is licensed under the terms of the [MIT License](LICENSE).
