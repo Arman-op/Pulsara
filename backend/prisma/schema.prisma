@@ -1,56 +1,203 @@
+// Pulsara data model.
+//
+// The connection string is supplied through the validated environment rather
+// than hard-coded, so the same schema drives a developer's container, CI and
+// production without edits. PostgreSQL is the only supported engine: the
+// telemetry features rely on time-ordered aggregate queries and partial
+// indexes that SQLite cannot express.
+
 generator client {
   provider = "prisma-client-js"
 }
+
 datasource db {
-  provider = "sqlite"
-  url      = "file:./dev.db"
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
-model User {
-  id           String       @id @default(uuid())
-  email        String       @unique
-  name         String
-  passwordHash String?
-  role         Role         @default(VIEWER)
-  avatarUrl    String?
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
-  deployments  Deployment[]
-  incidents    Incident[]   @relation("IncidentAssignee")
-  logs         AuditLog[]
-}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
 enum Role {
   ADMIN
   MEMBER
   VIEWER
 }
-model Service {
-  id           String       @id @default(uuid())
-  name         String
-  status       ServiceState @default(ONLINE)
-  uptime       Float        @default(100)
-  responseTime Int          @default(0)
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
-  incidents    Incident[]
+
+model User {
+  id String @id @default(uuid()) @db.Uuid
+
+  /// Stored lower-cased. Normalising at the single write path keeps the schema
+  /// free of the preview-gated `citext` extension, which managed Postgres
+  /// providers frequently restrict.
+  email String @unique @db.VarChar(320)
+  name  String @db.VarChar(120)
+
+  /// Argon2id digest. Null for accounts that authenticate exclusively through
+  /// a federated identity provider and therefore have no local password.
+  passwordHash String? @db.VarChar(255)
+
+  /// Subject claim from the federated identity provider, when one is linked.
+  firebaseUid String? @unique @db.VarChar(128)
+
+  role      Role    @default(VIEWER)
+  avatarUrl String? @db.VarChar(2048)
+  isActive  Boolean @default(true)
+
+  /// Access tokens issued before this moment are refused.
+  ///
+  /// Revoking refresh tokens ends a session's ability to *renew*, but an access
+  /// token already in someone's hands stays cryptographically valid until it
+  /// expires. Without this field, "sign out everywhere" left a stolen token
+  /// working for the rest of its lifetime — which is exactly the window the
+  /// person clicking it is trying to close.
+  sessionsValidFrom DateTime?
+
+  lastLoginAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  deployments   Deployment[]
+  incidents     Incident[]     @relation("IncidentAssignee")
+  auditLogs     AuditLog[]
+  refreshTokens RefreshToken[]
+
+  @@index([role])
 }
+
+/// A single issued refresh token.
+///
+/// Refresh tokens are persisted so that a session can actually be revoked;
+/// a stateless refresh token is valid until it expires no matter what the
+/// server learns about it in the meantime. Only the SHA-256 digest is stored,
+/// so a database disclosure does not hand an attacker usable sessions.
+model RefreshToken {
+  id String @id @default(uuid()) @db.Uuid
+
+  userId String @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// SHA-256 of the issued token, hex encoded.
+  tokenHash String @unique @db.VarChar(64)
+
+  /// Set when this token is rotated out, forming a chain that makes replay of
+  /// a superseded token detectable.
+  replacedByTokenId String? @db.Uuid
+
+  revokedAt DateTime?
+  expiresAt DateTime
+  createdAt DateTime  @default(now())
+
+  /// Recorded for the session list a user sees, and for incident forensics.
+  userAgent String? @db.VarChar(400)
+  ipAddress String? @db.VarChar(64)
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
+}
+
+// ---------------------------------------------------------------------------
+// Service catalogue
+// ---------------------------------------------------------------------------
+
 enum ServiceState {
   ONLINE
   OFFLINE
   DEGRADED
   MAINTENANCE
 }
-model Deployment {
-  id        String           @id @default(uuid())
-  repo      String
-  branch    String
-  status    DeploymentStatus @default(PENDING)
-  duration  Int?
-  userId    String
-  user      User             @relation(fields: [userId], references: [id])
-  createdAt DateTime         @default(now())
-  updatedAt DateTime         @updatedAt
-  stages    Stage[]
+
+/// How a service is checked for reachability.
+enum ProbeType {
+  /// Issue a request and assert the response status falls in the expected range.
+  HTTP
+  /// Open a TCP connection and assert the handshake completes.
+  TCP
 }
+
+model Service {
+  id String @id @default(uuid()) @db.Uuid
+
+  name        String  @unique @db.VarChar(120)
+  description String? @db.VarChar(500)
+
+  /// Current health.
+  ///
+  /// Persisted rather than derived because it is a state machine with
+  /// hysteresis: a service only changes state after a threshold number of
+  /// consecutive results agree, which needs memory of what came before.
+  ///
+  /// `uptime` and `responseTime` used to be stored alongside it. They are gone:
+  /// a denormalised column can drift from the observations it claims to
+  /// summarise, and this dashboard's entire value rests on not showing a number
+  /// nobody measured. Both are now computed from ProbeResult on read.
+  status ServiceState @default(ONLINE)
+
+  /// Null means the service is registered but not actively checked.
+  probeType   ProbeType?
+  /// Absolute URL for HTTP probes, or `host:port` for TCP probes.
+  probeTarget String?    @db.VarChar(2048)
+
+  probeIntervalSeconds Int @default(30)
+  probeTimeoutMs       Int @default(5000)
+
+  /// Inclusive HTTP status range treated as healthy.
+  expectedStatusMin Int @default(200)
+  expectedStatusMax Int @default(399)
+
+  /// Lets an operator silence a service without deleting its history.
+  isMonitored Boolean @default(true)
+
+  /// Hysteresis counters, maintained by the probe scheduler.
+  consecutiveFailures  Int @default(0)
+  consecutiveSuccesses Int @default(0)
+
+  lastCheckedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  incidents    Incident[]
+  probeResults ProbeResult[]
+
+  @@index([status])
+  @@index([isMonitored, lastCheckedAt])
+}
+
+/// One reachability check.
+///
+/// This is the raw observation every health figure in the product is derived
+/// from. Nothing writes here except the probe scheduler.
+model ProbeResult {
+  /// Monotonic integer rather than a UUID. This table is append-only and read
+  /// in timestamp order; a sequential key keeps inserts at the right edge of
+  /// the B-tree instead of scattering them across it the way a random UUID
+  /// does. At the default interval a 32-bit key lasts centuries.
+  id Int @id @default(autoincrement())
+
+  serviceId String  @db.Uuid
+  service   Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  ok         Boolean
+  /// Round-trip time in milliseconds; null when the probe never connected.
+  latencyMs  Int?
+  /// HTTP status observed, for HTTP probes only.
+  statusCode Int?
+  /// Failure reason, truncated. Null on success.
+  error      String? @db.VarChar(500)
+
+  checkedAt DateTime @default(now())
+
+  /// Uptime and latency are always "one service, a time window, newest first".
+  @@index([serviceId, checkedAt(sort: Desc)])
+  @@index([checkedAt])
+}
+
+// ---------------------------------------------------------------------------
+// Delivery pipeline
+// ---------------------------------------------------------------------------
+
 enum DeploymentStatus {
   PENDING
   RUNNING
@@ -58,54 +205,314 @@ enum DeploymentStatus {
   FAILED
   CANCELED
 }
+
+/// Continuous integration provider a deployment record came from.
+enum CiProvider {
+  GITHUB
+}
+
+/// A repository Pulsara mirrors workflow runs from.
+///
+/// Connections are configuration an operator creates; the runs themselves are
+/// pulled from the provider. Nothing here is invented locally.
+model RepoConnection {
+  id String @id @default(uuid()) @db.Uuid
+
+  provider CiProvider @default(GITHUB)
+  owner    String     @db.VarChar(120)
+  name     String     @db.VarChar(120)
+
+  /// The provider's own numeric repository id.
+  ///
+  /// Recorded because it survives a rename, while owner/name does not. A
+  /// repository renamed upstream would otherwise silently stop matching and
+  /// look like a repository that had gone quiet.
+  externalId String? @db.VarChar(64)
+
+  defaultBranch String? @db.VarChar(200)
+  isActive      Boolean @default(true)
+
+  lastSyncedAt  DateTime?
+  /// Last error from a sync attempt, surfaced in the UI so a broken token is
+  /// visible rather than presenting as an empty pipeline list.
+  lastSyncError String?   @db.VarChar(500)
+
+  /// ETag from the most recent successful list request.
+  ///
+  /// GitHub does not count a 304 response against the rate limit, so replaying
+  /// the ETag makes a frequent poll nearly free.
+  lastEtag String? @db.VarChar(200)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  deployments Deployment[]
+
+  @@unique([provider, owner, name])
+  @@index([isActive])
+}
+
+model Deployment {
+  id String @id @default(uuid()) @db.Uuid
+
+  provider CiProvider @default(GITHUB)
+
+  /// The provider's id for this run. Together with `provider` it is the
+  /// idempotency key: webhook delivery is at-least-once and overlaps with
+  /// backfill, so the same run arrives repeatedly and must upsert, not insert.
+  externalId  String  @db.VarChar(64)
+  /// Link back to the run on the provider, so a failure is one click from logs.
+  externalUrl String? @db.VarChar(2048)
+
+  repo   String @db.VarChar(200)
+  branch String @db.VarChar(200)
+
+  /// Name of the workflow that produced the run.
+  workflowName String? @db.VarChar(200)
+  /// Why the run started: push, pull_request, schedule, workflow_dispatch.
+  event        String? @db.VarChar(60)
+
+  status   DeploymentStatus @default(PENDING)
+  /// Wall-clock seconds, computed from the provider timestamps once finished.
+  duration Int?
+
+  commitSha      String? @db.VarChar(40)
+  commitMessage  String? @db.VarChar(500)
+  /// Provider login of whoever triggered the run.
+  actorLogin     String? @db.VarChar(120)
+  actorAvatarUrl String? @db.VarChar(2048)
+
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  repoConnectionId String?         @db.Uuid
+  repoConnection   RepoConnection? @relation(fields: [repoConnectionId], references: [id], onDelete: SetNull)
+
+  /// The Pulsara user who triggered this, when there is one.
+  ///
+  /// Nullable, unlike before. A run started by a CI bot or by someone with no
+  /// Pulsara account has no local user, and the previous non-null foreign key
+  /// made it impossible to record a real deployment without inventing an owner
+  /// for it.
+  userId String? @db.Uuid
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  stages Stage[]
+
+  @@unique([provider, externalId])
+  @@index([status, createdAt(sort: Desc)])
+  @@index([repo, createdAt(sort: Desc)])
+  @@index([repoConnectionId, createdAt(sort: Desc)])
+}
+
 model Stage {
-  id           String           @id @default(uuid())
-  name         String
-  status       DeploymentStatus @default(PENDING)
-  duration     Int?
-  logs         String?
-  deploymentId String
-  deployment   Deployment       @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
-  createdAt    DateTime         @default(now())
-  updatedAt    DateTime         @updatedAt
+  id String @id @default(uuid()) @db.Uuid
+
+  /// Provider id for the job, so repeated webhook deliveries upsert.
+  externalId String? @db.VarChar(64)
+
+  name   String           @db.VarChar(120)
+  status DeploymentStatus @default(PENDING)
+
+  duration    Int?
+  /// Link to this job's logs on the provider.
+  externalUrl String? @db.VarChar(2048)
+
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  deploymentId String     @db.Uuid
+  deployment   Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([deploymentId, externalId])
+  @@index([deploymentId])
 }
-model Incident {
-  id          String         @id @default(uuid())
-  title       String
-  description String?
-  severity    Severity
-  status      IncidentStatus @default(INVESTIGATING)
-  serviceId   String?
-  service     Service?       @relation(fields: [serviceId], references: [id])
-  assigneeId  String?
-  assignee    User?          @relation("IncidentAssignee", fields: [assigneeId], references: [id])
-  createdAt   DateTime       @default(now())
-  updatedAt   DateTime       @updatedAt
-}
+
+// ---------------------------------------------------------------------------
+// Incident management
+// ---------------------------------------------------------------------------
+
 enum Severity {
   CRITICAL
   HIGH
   MEDIUM
   LOW
 }
+
 enum IncidentStatus {
   INVESTIGATING
   IDENTIFIED
   MONITORING
   RESOLVED
 }
-model Metric {
-  id        String   @id @default(uuid())
-  type      String   // cpu, memory, network, disk
-  value     Float
-  timestamp DateTime @default(now())
-  host      String   @default("production-node-1")
+
+/// Where an incident came from.
+enum IncidentSource {
+  /// Opened by the alerting engine from observed probe results.
+  AUTOMATED
+  /// Opened by a person.
+  MANUAL
 }
-model AuditLog {
-  id        String   @id @default(uuid())
-  action    String
-  resource  String
-  userId    String
-  user      User     @relation(fields: [userId], references: [id])
+
+model Incident {
+  id String @id @default(uuid()) @db.Uuid
+
+  title       String  @db.VarChar(200)
+  description String?
+
+  severity Severity
+  status   IncidentStatus @default(INVESTIGATING)
+  source   IncidentSource @default(MANUAL)
+
+  serviceId String?  @db.Uuid
+  service   Service? @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+
+  assigneeId String? @db.Uuid
+  assignee   User?   @relation("IncidentAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+
+  /// Identity of the *condition*, not of this occurrence.
+  ///
+  /// The alerting engine writes one key per (service, condition). Combined with
+  /// the partial unique index below it guarantees at most one open automated
+  /// incident per condition, so a service flapping every thirty seconds
+  /// produces one incident rather than one per probe.
+  dedupeKey String? @db.VarChar(200)
+
+  /// True while the incident counts as open. Stored rather than derived from
+  /// the status enum, because a partial unique index needs a concrete column,
+  /// and because being open is the concept the deduplication rule is about.
+  isOpen Boolean @default(true)
+
+  resolvedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  events IncidentEvent[]
+
+  @@index([status, createdAt(sort: Desc)])
+  @@index([serviceId, isOpen])
+  @@index([isOpen, severity])
+}
+
+/// What happened to an incident, and when.
+///
+/// An incident row only shows the current state. The timeline is what makes a
+/// postmortem possible: when it opened, who picked it up, what changed, when it
+/// resolved and how long that took.
+model IncidentEvent {
+  id Int @id @default(autoincrement())
+
+  incidentId String   @db.Uuid
+  incident   Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+
+  kind    IncidentEventKind
+  message String            @db.VarChar(1000)
+
+  /// Null when the alerting engine acted rather than a person.
+  actorId String? @db.Uuid
+
   createdAt DateTime @default(now())
+
+  @@index([incidentId, createdAt])
+}
+
+enum IncidentEventKind {
+  OPENED
+  STATUS_CHANGED
+  SEVERITY_CHANGED
+  ASSIGNED
+  COMMENTED
+  RESOLVED
+  REOPENED
+}
+
+// ---------------------------------------------------------------------------
+// Telemetry
+// ---------------------------------------------------------------------------
+
+/// One host telemetry sample.
+///
+/// Written only by the host collector, from real readings taken through
+/// `systeminformation`. The previous implementation never wrote this table at
+/// all: the dashboard's chart was fed directly from a `Math.random()` generator
+/// in the WebSocket layer, so no measurement was ever recorded or recoverable.
+model Metric {
+  /// Sequential for the same reason as ProbeResult: append-only, time-ordered.
+  id Int @id @default(autoincrement())
+
+  /// Metric family, for example `cpu`, `memory`, `disk`, `network_rx`.
+  type  String @db.VarChar(60)
+  value Float
+  /// Unit of `value`, so a consumer never has to infer it from the name.
+  unit  String @db.VarChar(20)
+  /// Identifies the machine the sample was taken on.
+  host  String @db.VarChar(200)
+
+  recordedAt DateTime @default(now())
+
+  /// Time-series reads are always "one metric family, one host, newest first",
+  /// so the composite index matches the access pattern exactly.
+  @@index([host, type, recordedAt(sort: Desc)])
+  /// Supports the retention sweep, which deletes purely by age.
+  @@index([recordedAt])
+}
+
+// ---------------------------------------------------------------------------
+// Audit
+// ---------------------------------------------------------------------------
+
+/// A privileged action, recorded for accountability.
+///
+/// Until now this table existed but nothing ever wrote to it. It is now the
+/// record of who changed what: role grants, deactivations, and password
+/// changes. These are exactly the actions that matter after an incident, and
+/// the ones a person is most likely to want to deny having taken.
+model AuditLog {
+  id String @id @default(uuid()) @db.Uuid
+
+  action AuditAction
+
+  /// The kind of thing acted on, e.g. `user`.
+  resource   String  @db.VarChar(120)
+  /// Identifier of the specific record acted on.
+  resourceId String? @db.VarChar(120)
+
+  /// Structured before/after detail. Never contains a credential.
+  metadata Json?
+
+  /// Who performed the action.
+  userId String @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  ipAddress String? @db.VarChar(64)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([resource, resourceId, createdAt(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+}
+
+enum AuditAction {
+  USER_ROLE_CHANGED
+  USER_DEACTIVATED
+  USER_REACTIVATED
+  USER_PROFILE_UPDATED
+  PASSWORD_CHANGED
+  SESSIONS_REVOKED
+  SERVICE_CREATED
+  SERVICE_UPDATED
+  SERVICE_DELETED
+  REPO_CONNECTED
+  REPO_DISCONNECTED
+  INCIDENT_CREATED
+  INCIDENT_STATUS_CHANGED
+  INCIDENT_SEVERITY_CHANGED
+  INCIDENT_ASSIGNED
 }

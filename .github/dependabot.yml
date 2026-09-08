@@ -1,0 +1,66 @@
+# Dependency updates.
+#
+# Weekly rather than daily: a pull request nobody reviews is worse than no pull
+# request, and a flood of them trains people to close without reading.
+#
+# Patch and minor updates are grouped into one pull request per package so CI
+# runs once and a reviewer reads one diff. Majors stay separate, because each is
+# a decision — this repository has two open advisories whose only fix is a major
+# bump into a dependency whose parent has not taken it, and that is exactly the
+# call a human should make rather than a bot.
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /backend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      backend-minor-and-patch:
+        update-types: ['minor', 'patch']
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      frontend-minor-and-patch:
+        update-types: ['minor', 'patch']
+
+  # Playwright is the one dependency here that has to keep pace with a browser,
+  # so leaving it out would mean the browser suite quietly ages out of what
+  # Chromium actually does.
+  - package-ecosystem: npm
+    directory: /e2e
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      e2e-minor-and-patch:
+        update-types: ['minor', 'patch']
+
+  # Provider versions are pinned in infra/.terraform.lock.hcl by checksum, so
+  # they never drift on their own — which is the point, and also why nothing
+  # would ever update them without this.
+  - package-ecosystem: terraform
+    directory: /infra
+    schedule:
+      interval: monthly
+
+  # The workflows themselves pin action versions, which go stale silently.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+
+  # Base images carry the OpenSSL and libc that Prisma and argon2 link against.
+  - package-ecosystem: docker
+    directory: /backend
+    schedule:
+      interval: monthly
+  - package-ecosystem: docker
+    directory: /frontend
+    schedule:
+      interval: monthly

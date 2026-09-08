@@ -1,0 +1,273 @@
+name: CI
+
+# Runs on every push and pull request. Images are built on every run so that a
+# Dockerfile break is caught by the PR that causes it, but only pushed from the
+# default branch — a pull request from a fork must never be able to publish a
+# tag that a deployment might pull.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+# A new push to the same branch makes the previous run's answer irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+
+permissions:
+  contents: read
+
+jobs:
+  api:
+    name: API
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: pulsara
+          POSTGRES_PASSWORD: pulsara_ci
+          POSTGRES_DB: pulsara_test
+        ports:
+          - 5432:5432
+        # Without this the first migration races the database's own start-up.
+        options: >-
+          --health-cmd "pg_isready -U pulsara -d pulsara_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      # The cache and probe-queue suites run against a real Redis for the same
+      # reason the rest run against a real PostgreSQL: what is worth testing —
+      # that invalidation actually deletes, that two schedulers do not double
+      # probe — is behaviour of the broker, not of the code calling it.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgresql://pulsara:pulsara_ci@localhost:5432/pulsara_test
+      TEST_REDIS_URL: redis://localhost:6379
+      # Present so that Prisma's CLI has a datasource; the suite overrides the
+      # runtime value with TEST_DATABASE_URL.
+      DATABASE_URL: postgresql://pulsara:pulsara_ci@localhost:5432/pulsara_test
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run db:generate
+
+      # Ordered cheapest-first, so an obvious failure is reported in seconds
+      # rather than after the database has been migrated.
+      - name: Format
+        run: npm run format:check
+
+      - name: Lint
+        run: npm run lint
+
+      # Fails on a high or critical advisory in production dependencies that
+      # nobody has justified. scripts/audit-allowlist.json is where a finding
+      # gets excused, and each entry has to say why and carry a review date.
+      - name: Audit dependencies
+        run: npm run audit
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      # Coverage rather than a plain run: the thresholds in vitest.config.ts are
+      # a floor set just under what the suite reaches, so a change that removes
+      # coverage fails here rather than being noticed a release later.
+      - name: Integration tests with coverage
+        run: npm run test:coverage
+
+      - name: Build
+        run: npm run build
+
+  web:
+    name: Web
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    env:
+      # The client's env schema rejects a missing value at import, so the build
+      # and the tests both need one. It is not a secret; it is a URL.
+      VITE_API_URL: http://localhost:4000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Format
+        run: npm run format:check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Audit dependencies
+        run: npm run audit
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Tests with coverage
+        run: npm run test:coverage
+
+      - name: Build
+        run: npm run build
+
+  e2e:
+    name: End to end
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: pulsara
+          POSTGRES_PASSWORD: pulsara_ci
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pulsara"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      E2E_DATABASE_URL: postgresql://pulsara:pulsara_ci@localhost:5432/pulsara_e2e
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # Playwright starts both servers itself, so both packages need installing.
+      - name: Install
+        run: |
+          npm --prefix backend ci
+          npm --prefix frontend ci
+          npm --prefix e2e ci
+
+      - name: Generate Prisma client
+        run: npm --prefix backend run db:generate
+
+      - name: Format
+        run: npm --prefix e2e run format:check
+
+      - name: Typecheck
+        run: npm --prefix e2e run typecheck
+
+      - name: Install Chromium
+        run: npm --prefix e2e run install:browsers
+
+      - name: Run the browser suite
+        run: npm --prefix e2e test
+
+      # Only on failure: a passing run should leave nothing behind, and a trace
+      # is what makes a failure diagnosable without reproducing it locally.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-trace
+          path: e2e/test-results/
+          retention-days: 7
+
+  images:
+    name: Images
+    runs-on: ubuntu-latest
+    needs: [api, web]
+
+    permissions:
+      contents: read
+      # Required to push to GHCR; scoped to this job rather than the workflow.
+      packages: write
+
+    strategy:
+      matrix:
+        include:
+          - name: api
+            context: backend
+          - name: web
+            context: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Sign in to GHCR
+        # Only when the run can actually publish: a pull request from a fork has
+        # a read-only token, and attempting a login would fail the job for a
+        # reason that has nothing to do with the change under review.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}/${{ matrix.name }}
+          tags: |
+            type=sha,format=long
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build${{ github.ref == 'refs/heads/main' && ' and push' || '' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # The client bakes its API origin into the bundle, so the published
+          # image is built for a specific deployment. The repository variable is
+          # the one place that is configured.
+          build-args: |
+            VITE_API_URL=${{ vars.VITE_API_URL || 'http://localhost:4000' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

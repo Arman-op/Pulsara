@@ -1,0 +1,17 @@
+# `.env` must never reach a build layer: Vite inlines VITE_* values into the
+# bundle, so a stray local file would not only leak into the image, it would be
+# compiled into JavaScript that gets served to every visitor.
+.env
+.env.*
+!.env.example
+
+node_modules
+dist
+coverage
+
+.git
+.gitignore
+Dockerfile
+.dockerignore
+
+*.log

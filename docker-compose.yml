@@ -1,63 +1,132 @@
-version: '3.8'
+# Local development and a runnable full stack.
+#
+# By default this file brings up only the backing services, because that is what
+# a developer running `npm run dev` in two terminals actually needs:
+#
+#     docker compose up -d
+#
+# The application containers live behind the `app` profile, so that the default
+# path stays fast and, more importantly, does not fail on a clean checkout. They
+# read `backend/.env`, which is deliberately not in the repository:
+#
+#     cp backend/.env.example backend/.env   # then fill in the secrets
+#     docker compose --profile app up --build
+#
+# The previous version of this file declared `frontend` and `backend` services
+# that built from Dockerfiles which did not exist, so `docker compose up` failed
+# on a clean checkout — and hard-coded `JWT_SECRET=production_secret_change_me`,
+# a value the API now refuses to start with.
+#
+# Redis is here because two things now use it: the probe queue, which makes the
+# sweep singular across replicas instead of multiplying probes by replica count,
+# and the read cache in front of the two endpoints that cost real work. It stays
+# optional — without REDIS_URL the API probes on an in-process timer and reads
+# go straight to PostgreSQL, which is correct for a single instance.
+
 services:
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    ports:
-      - "80:80"
-    depends_on:
-      - backend
-    restart: unless-stopped
-    networks:
-      - pulsara-net
-  backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    ports:
-      - "4000:4000"
+  postgres:
+    image: postgres:16-alpine
+    container_name: pulsara-postgres-dev
     environment:
-      - NODE_ENV=production
-      - PORT=4000
-      - DATABASE_URL=postgresql://postgres:postgres@db:5432/pulsara?schema=public
-      - JWT_SECRET=production_secret_change_me
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_started
-    restart: unless-stopped
-    networks:
-      - pulsara-net
-  db:
-    image: postgres:15-alpine
-    environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=pulsara
+      POSTGRES_USER: pulsara
+      POSTGRES_PASSWORD: pulsara_local_dev
+      POSTGRES_DB: pulsara
     ports:
-      - "5433:5432"
+      # Deliberately not 5432: developers commonly have a native PostgreSQL
+      # already bound there, and a silent port clash is a confusing failure.
+      - '5433:5432'
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ['CMD-SHELL', 'pg_isready -U pulsara -d pulsara']
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+    restart: unless-stopped
     networks:
-      - pulsara-net
+      - pulsara
+
   redis:
     image: redis:7-alpine
+    container_name: pulsara-redis-dev
     ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
+      # Not 6379, for the same reason PostgreSQL is not on 5432: a developer
+      # commonly has one already bound there.
+      - '6380:6379'
+    command:
+      # Bounded and evicting, because everything stored here is a cache entry or
+      # a transient job — nothing is a record of anything. An unbounded Redis
+      # that fills up starts refusing writes, which would take the probe queue
+      # down with it.
+      - redis-server
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - allkeys-lru
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
     networks:
-      - pulsara-net
+      - pulsara
+
+  api:
+    profiles: ['app']
+    build:
+      context: ./backend
+    container_name: pulsara-api
+    env_file:
+      - ./backend/.env
+    environment:
+      NODE_ENV: production
+      PORT: '4000'
+      # Overrides whatever `.env` says: inside the network the database is
+      # reachable by service name on its own port, not on the published 5433.
+      DATABASE_URL: postgresql://pulsara:pulsara_local_dev@postgres:5432/pulsara?schema=public
+      # The browser reaches the client on the published port below, so that is
+      # the origin the API must allow.
+      CORS_ORIGINS: http://localhost:5174
+      # In-network name and port, not the published one.
+      REDIS_URL: redis://redis:6379
+    ports:
+      - '4000:4000'
+    depends_on:
+      postgres:
+        # Waits for the healthcheck, not merely for the container to exist —
+        # otherwise the API starts, fails to connect, and exits.
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - pulsara
+
+  web:
+    profiles: ['app']
+    build:
+      context: ./frontend
+      args:
+        # Vite inlines this at build time, so it is a build argument. The value
+        # is the origin the *browser* uses, which is the published port above,
+        # not the in-network service name.
+        VITE_API_URL: http://localhost:4000
+    container_name: pulsara-web
+    ports:
+      # The image serves on 8080 as an unprivileged user; 5174 keeps the origin
+      # identical to the Vite dev server, so CORS_ORIGINS does not change
+      # between the two ways of running the client.
+      - '5174:8080'
+    depends_on:
+      - api
+    restart: unless-stopped
+    networks:
+      - pulsara
+
 networks:
-  pulsara-net:
+  pulsara:
     driver: bridge
+
 volumes:
   postgres-data:
-  redis-data:

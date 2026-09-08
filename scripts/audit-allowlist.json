@@ -1,0 +1,29 @@
+{
+  "$comment": [
+    "Advisories that are present in the dependency tree but not reachable in this application.",
+    "Every entry states why, and carries a review date so it cannot quietly become permanent.",
+    "An advisory not listed here fails the build, whatever its severity, if it is high or above."
+  ],
+  "allowed": [
+    {
+      "module": "deepmerge-ts",
+      "advisory": "GHSA-3v2c-x4rc-hxq7",
+      "title": "Stack exhaustion when merging recursive object graphs",
+      "severity": "high",
+      "path": "@prisma/client -> prisma -> @prisma/config -> deepmerge-ts",
+      "why": "Reached only by Prisma's config loader, which merges prisma.config.ts — a file in this repository. The input is never attacker-controlled, and the loader runs at CLI and startup time rather than on a request path.",
+      "fix": "Requires deepmerge-ts >= 8, a major bump that @prisma/config has not taken. Forcing it through an override would put an untested major inside Prisma's own config loading, which is a larger risk than the advisory.",
+      "reviewBy": "2026-12-01"
+    },
+    {
+      "module": "uuid",
+      "advisory": "GHSA-xf8f-mmwh-4v4v",
+      "title": "Missing buffer bounds check in v3/v5/v6 when buf is provided",
+      "severity": "moderate",
+      "path": "firebase-admin -> @google-cloud/{firestore,storage} -> uuid",
+      "why": "Pulsara uses exactly one function from firebase-admin, verifyIdToken. The Firestore and Cloud Storage clients that reach uuid are never constructed, and the advisory additionally requires the caller to pass a buf argument, which nothing here does.",
+      "fix": "Requires uuid >= 11.1.1, two majors above what the Google Cloud libraries pin. firebase-admin v14 may carry it; upgrading the auth SDK across a major without a real Firebase project to verify against would be shipping an untested change to the sign-in path.",
+      "reviewBy": "2026-12-01"
+    }
+  ]
+}

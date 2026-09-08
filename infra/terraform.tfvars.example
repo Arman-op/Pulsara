@@ -1,0 +1,38 @@
+# Copy to terraform.tfvars and fill in. That file is gitignored: it names one
+# account's hosted zone and domain, and committing it would make standing up a
+# second environment a matter of editing tracked code.
+#
+# Everything not listed here has a default in variables.tf that is right for a
+# first deployment. These four have no safe default.
+
+# The name the application is served on. The client and the API share it, so
+# every request is same-origin and CORS never enters production.
+domain_name = "pulsara.example.com"
+
+# A hosted zone that already delegates the name above. Terraform adds the
+# certificate-validation and alias records to it; it does not create the zone or
+# change the registrar's delegation.
+route53_zone_id = "Z0123456789ABCDEFGHIJ"
+
+# The bucket holding this state, repeated from the -backend-config so the CI
+# plan role's policy can name exactly the objects it needs.
+state_bucket = "pulsara-tfstate-000000000000"
+state_key    = "production/terraform.tfstate"
+
+# --- Worth deciding rather than accepting -----------------------------------
+
+# aws_region = "eu-west-1"
+
+# Two NAT gateways instead of one: about $33/month more, and a zone failure
+# stops taking outbound internet access away from the other zone's tasks.
+# single_nat_gateway = false
+
+# A synchronous standby in the second zone. Roughly doubles the instance bill
+# and turns a zone failure from "restore a snapshot, tens of minutes" into
+# "automatic failover, one to two minutes".
+# db_multi_az = true
+
+# Switch these on only once a value is in the secret Terraform created. A task
+# definition that references an empty secret fails to start.
+# enable_firebase_auth      = true
+# enable_github_integration = true

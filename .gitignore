@@ -39,3 +39,34 @@ yarn-error.log*
 .vscode/
 .idea/
 Thumbs.db
+
+# Test output
+# Coverage is reported by CI and read from the job log; a committed report is
+# stale the moment the next commit lands.
+coverage/
+**/coverage/
+# Playwright's failure artefacts: traces, screenshots and videos, uploaded by
+# the CI job when a run fails and regenerated locally on every run.
+e2e/test-results/
+e2e/playwright-report/
+e2e/blob-report/
+# The e2e global setup writes its database snippets here to run them, because
+# an eval'd script cannot use top-level await. They are removed on the way out.
+backend/.e2e-setup-*.mts
+
+# Terraform
+# .terraform/ is a download cache holding provider binaries; the lock file
+# beside it IS committed, because pinning provider checksums is the whole point
+# of having one.
+infra/.terraform/
+infra/.terraform.tfstate.lock.info
+*.tfstate
+*.tfstate.*
+# Names one account's zone, domain and state bucket.
+*.tfvars
+!*.tfvars.example
+# A saved plan carries the values state does, generated passwords included.
+tfplan
+plan.txt
+crash.log
+crash.*.log
