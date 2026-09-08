@@ -101,7 +101,7 @@ jobs:
       # A read-only role, assumed over OIDC. There is no AWS access key in this
       # repository; infra/iam.tf declares this role and the trust policy that
       # restricts it to this repository.
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_TERRAFORM_PLAN_ROLE_ARN }}
           role-session-name: pulsara-tf-plan-${{ github.run_id }}
@@ -208,7 +208,7 @@ jobs:
       # out of band rather than by the configuration it applies. Terraform
       # creating the role that lets a workflow run Terraform is a loop with an
       # account takeover in the middle of it.
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_TERRAFORM_APPLY_ROLE_ARN }}
           role-session-name: pulsara-tf-apply-${{ github.run_id }}
